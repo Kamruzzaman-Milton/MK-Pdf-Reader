@@ -1,0 +1,191 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="bgGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0F172A" />
+      <stop offset="50%" stop-color="#1E1B4B" />
+      <stop offset="100%" stop-color="#0F172A" />
+    </linearGradient>
+
+    <!-- Outer Glow -->
+    <linearGradient id="borderGlow" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38BDF8" stop-opacity="0.6" />
+      <stop offset="50%" stop-color="#6366F1" stop-opacity="0.3" />
+      <stop offset="100%" stop-color="#F43F5E" stop-opacity="0.5" />
+    </linearGradient>
+
+    <!-- Document Back Shadow -->
+    <filter id="dropShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="16" stdDeviation="16" flood-color="#000000" flood-opacity="0.5" />
+    </filter>
+    <filter id="glowShadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#EF4444" flood-opacity="0.4" />
+    </filter>
+
+    <!-- Document Page Gradients -->
+    <linearGradient id="backPageGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#334155" />
+      <stop offset="100%" stop-color="#1E293B" />
+    </linearGradient>
+
+    <linearGradient id="mainPageGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF" />
+      <stop offset="100%" stop-color="#F1F5F9" />
+    </linearGradient>
+
+    <!-- Folded Corner Gradient -->
+    <linearGradient id="foldGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#CBD5E1" />
+      <stop offset="100%" stop-color="#94A3B8" />
+    </linearGradient>
+
+    <!-- PDF Brand Badge Gradient -->
+    <linearGradient id="pdfBadgeGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FF334B" />
+      <stop offset="100%" stop-color="#D90429" />
+    </linearGradient>
+
+    <!-- Accent Flare -->
+    <linearGradient id="accentGlow" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#38BDF8" />
+      <stop offset="100%" stop-color="#818CF8" />
+    </linearGradient>
+  </defs>
+
+  <!-- Base Squircle -->
+  <rect x="16" y="16" width="480" height="480" rx="108" fill="url(#bgGradient)" stroke="url(#borderGlow)" stroke-width="4" />
+
+  <!-- Background Decorative Geometry / Ambient Glow -->
+  <circle cx="120" cy="120" r="140" fill="#6366F1" opacity="0.12" filter="blur(40px)" />
+  <circle cx="390" cy="390" r="130" fill="#EF4444" opacity="0.12" filter="blur(40px)" />
+
+  <!-- Secondary / Stacked Page (Behind) -->
+  <rect x="156" y="86" width="224" height="310" rx="20" fill="url(#backPageGrad)" transform="rotate(7 268 241)" opacity="0.6" stroke="#475569" stroke-width="2" />
+
+  <!-- Main Document Page -->
+  <g filter="url(#dropShadow)">
+    <!-- Base White Sheet with Cutout Top-Right Corner for Fold -->
+    <path d="M 134 104
+             C 134 90.7, 144.7 80, 158 80
+             L 306 80
+             L 378 152
+             L 378 392
+             C 378 405.3, 367.3 416, 354 416
+             L 158 416
+             C 144.7 416, 134 405.3, 134 392
+             Z"
+          fill="url(#mainPageGrad)" />
+
+    <!-- Folded Corner Flap -->
+    <path d="M 306 80
+             L 306 136
+             C 306 144.8, 313.2 152, 322 152
+             L 378 152
+             Z"
+          fill="url(#foldGrad)" />
+
+    <!-- Soft Underfold Shadow -->
+    <path d="M 306 152
+             L 378 152
+             L 306 80
+             Z"
+          fill="#64748B" opacity="0.22" />
+
+    <!-- Simulated Text Lines (High-clarity reading aesthetic) -->
+    <rect x="166" y="174" width="112" height="10" rx="5" fill="#94A3B8" />
+    <rect x="166" y="198" width="180" height="8" rx="4" fill="#CBD5E1" />
+    <rect x="166" y="218" width="164" height="8" rx="4" fill="#CBD5E1" />
+    <rect x="166" y="238" width="176" height="8" rx="4" fill="#CBD5E1" />
+
+    <rect x="166" y="268" width="140" height="8" rx="4" fill="#E2E8F0" />
+    <rect x="166" y="288" width="170" height="8" rx="4" fill="#E2E8F0" />
+    <rect x="166" y="308" width="130" height="8" rx="4" fill="#E2E8F0" />
+
+    <!-- Bookmark Ribbon Hanging From Top -->
+    <path d="M 270 80
+             L 270 148
+             L 282 138
+             L 294 148
+             L 294 80
+             Z"
+          fill="#38BDF8" opacity="0.95" />
+  </g>
+
+  <!-- Floating PDF Brand Badge with Glow -->
+  <g filter="url(#glowShadow)">
+    <!-- Badge Background Pill -->
+    <rect x="116" y="326" width="220" height="82" rx="22" fill="url(#pdfBadgeGrad)" stroke="#FFA4B0" stroke-width="2" />
+
+    <!-- Glossy Highlight Curve -->
+    <path d="M 124 336
+             C 124 336, 170 348, 226 348
+             C 282 348, 328 336, 328 336
+             C 328 336, 296 358, 226 358
+             C 156 358, 124 336, 124 336
+             Z"
+          fill="#FFFFFF" opacity="0.2" />
+
+    <!-- PDF Bold Vector Typography -->
+    <!-- 'P' -->
+    <path d="M 152 350
+             L 174 350
+             C 183 350, 189 355, 189 363
+             C 189 371, 183 376, 174 376
+             L 163 376
+             L 163 392
+             L 152 392
+             Z
+             M 163 359
+             L 172 359
+             C 176 359, 178 360.5, 178 363
+             C 178 365.5, 176 367, 172 367
+             L 163 367
+             Z"
+          fill="#FFFFFF" />
+
+    <!-- 'D' -->
+    <path d="M 199 350
+             L 219 350
+             C 230 350, 237 358, 237 371
+             C 237 384, 230 392, 219 392
+             L 199 392
+             Z
+             M 210 359
+             L 210 383
+             L 218 383
+             C 223 383, 226 379, 226 371
+             C 226 363, 223 359, 218 359
+             Z"
+          fill="#FFFFFF" />
+
+    <!-- 'F' -->
+    <path d="M 247 350
+             L 278 350
+             L 278 359
+             L 258 359
+             L 258 367
+             L 274 367
+             L 274 376
+             L 258 376
+             L 258 392
+             L 247 392
+             Z"
+          fill="#FFFFFF" />
+
+    <!-- Tiny Lightning / Spark Accent -->
+    <circle cx="304" cy="358" r="4" fill="#FFE4E6" />
+    <circle cx="316" cy="374" r="6" fill="#FFFFFF" />
+    <circle cx="302" cy="386" r="3" fill="#FFE4E6" />
+  </g>
+
+  <!-- Sharp Lens / Clarity Accent (Bottom Right Floating Glass Ring) -->
+  <g filter="url(#dropShadow)" opacity="0.95">
+    <circle cx="360" cy="360" r="34" fill="#1E293B" stroke="url(#accentGlow)" stroke-width="4.5" />
+    <!-- Glass Inner Lens -->
+    <circle cx="360" cy="360" r="28" fill="#38BDF8" opacity="0.18" />
+    <!-- Magnifier Handle -->
+    <path d="M 384 384 L 406 406" stroke="#38BDF8" stroke-width="6" stroke-linecap="round" />
+    <!-- Center Optics Plus / Crosshair -->
+    <path d="M 360 349 L 360 371 M 349 360 L 371 360" stroke="#FFFFFF" stroke-width="2.5" stroke-linecap="round" opacity="0.85" />
+  </g>
+</svg>

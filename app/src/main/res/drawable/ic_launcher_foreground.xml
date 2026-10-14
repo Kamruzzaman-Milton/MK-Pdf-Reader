@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Main Document Page with folded corner -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M32,24 L64,24 L76,36 L76,82 C76,84.2 74.2,86 72,86 L32,86 C29.8,86 28,84.2 28,82 L28,28 C28,25.8 29.8,24 32,24 Z" />
+
+    <!-- Corner fold shadow & flap -->
+    <path
+        android:fillColor="#E0E0E0"
+        android:pathData="M64,24 L76,36 L64,36 Z" />
+    <path
+        android:fillColor="#BDBDBD"
+        android:pathData="M64,24 L64,36 L76,36 Z" />
+
+    <!-- Red PDF Badge Banner across top-center -->
+    <path
+        android:fillColor="#D32F2F"
+        android:pathData="M24,44 L58,44 C60.2,44 62,45.8 62,48 L62,58 C62,60.2 60.2,62 58,62 L24,62 Z" />
+
+    <!-- "PDF" Text on Badge (Simplified vector path representation) -->
+    <!-- P -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M30,48 L35,48 C36.7,48 38,49.1 38,50.5 C38,51.9 36.7,53 35,53 L32,53 L32,58 L30,58 Z M32,50 L32,51.5 L34.8,51.5 C35.4,51.5 36,51 36,50.7 C36,50.4 35.4,50 34.8,50 Z" />
+
+    <!-- D -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M40,48 L44,48 C46.8,48 49,49.8 49,53 C49,56.2 46.8,58 44,58 L40,58 Z M42,50 L42,56 L43.8,56 C45.3,56 46.8,54.8 46.8,53 C46.8,51.2 45.3,50 43.8,50 Z" />
+
+    <!-- F -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M51,48 L58,48 L58,50 L53,50 L53,52.5 L57,52.5 L57,54.5 L53,54.5 L53,58 L51,58 Z" />
+
+    <!-- Document Content Lines -->
+    <path
+        android:fillColor="#9E9E9E"
+        android:pathData="M34,34 L56,34 L56,36 L34,36 Z" />
+    <path
+        android:fillColor="#BDBDBD"
+        android:pathData="M34,68 L70,68 L70,70 L34,70 Z" />
+    <path
+        android:fillColor="#BDBDBD"
+        android:pathData="M34,74 L60,74 L60,76 L34,76 Z" />
+
+    <!-- Little bookmark ribbon on bottom right -->
+    <path
+        android:fillColor="#FF5252"
+        android:pathData="M66,74 L74,74 L74,86 L70,82 L66,86 Z" />
+</vector>

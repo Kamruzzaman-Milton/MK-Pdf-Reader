@@ -1,0 +1,6 @@
+{
+  "name": "MK PDF Reader",
+  "description": "Lightweight, high-performance Android PDF reader with smooth on-demand rendering, dual reading modes, gesture zoom, and page jump.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
