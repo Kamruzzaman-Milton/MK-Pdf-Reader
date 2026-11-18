@@ -20,6 +20,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -39,12 +40,17 @@ import kotlinx.coroutines.launch
 
 /**
  * Resilient document picker contract.
- * Automatically falls back to ACTION_GET_CONTENT when Android's default DocumentsUI
- * is disabled and the user is using third-party file managers like MiXplorer.
+ * Tries ACTION_OPEN_DOCUMENT first with persistable read flags, and falls back
+ * to ACTION_GET_CONTENT when Android's default DocumentsUI is unavailable.
  */
 class OpenPdfDocumentContract : ActivityResultContracts.OpenDocument() {
     override fun createIntent(context: Context, input: Array<String>): Intent {
-        val openDocIntent = super.createIntent(context, input)
+        val openDocIntent = super.createIntent(context, input).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "application/pdf"
+            putExtra(Intent.EXTRA_MIME_TYPES, input)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+        }
         val resolve = openDocIntent.resolveActivity(context.packageManager)
         return if (resolve != null) {
             openDocIntent
@@ -53,6 +59,7 @@ class OpenPdfDocumentContract : ActivityResultContracts.OpenDocument() {
                 addCategory(Intent.CATEGORY_OPENABLE)
                 type = "application/pdf"
                 putExtra(Intent.EXTRA_MIME_TYPES, input)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
             }
         }
     }
@@ -63,6 +70,7 @@ class MainActivity : ComponentActivity() {
     private val homeViewModel: HomeViewModel by viewModels()
     private val readerViewModel: PdfReaderViewModel by viewModels()
     private var isReaderVisible: Boolean = false
+    private var pendingIntentUri by mutableStateOf<Uri?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -74,7 +82,7 @@ class MainActivity : ComponentActivity() {
         }
 
         // Check if launched via ACTION_VIEW or ACTION_SEND
-        val initialUri = extractPdfUriFromIntent(intent)
+        pendingIntentUri = extractPdfUriFromIntent(intent)
 
         setContent {
             val appSettings by homeViewModel.appSettings.collectAsStateWithLifecycle()
@@ -85,7 +93,8 @@ class MainActivity : ComponentActivity() {
                 MainAppContent(
                     homeViewModel = homeViewModel,
                     readerViewModel = readerViewModel,
-                    initialPdfUri = initialUri,
+                    initialPdfUri = pendingIntentUri,
+                    onIntentUriConsumed = { pendingIntentUri = null },
                     onKeepScreenAwakeChange = { keepAwake ->
                         if (keepAwake) {
                             window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -131,7 +140,7 @@ class MainActivity : ComponentActivity() {
         setIntent(intent)
         val uri = extractPdfUriFromIntent(intent)
         if (uri != null) {
-            readerViewModel.loadPdf(uri)
+            pendingIntentUri = uri
         }
     }
 
@@ -162,12 +171,14 @@ fun MainAppContent(
     homeViewModel: HomeViewModel,
     readerViewModel: PdfReaderViewModel,
     initialPdfUri: Uri? = null,
+    onIntentUriConsumed: () -> Unit = {},
     onKeepScreenAwakeChange: (Boolean) -> Unit = {},
     onReaderVisibilityChanged: (Boolean) -> Unit = {}
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var currentPdfUriString by rememberSaveable {
-        mutableStateOf(initialPdfUri?.toString())
+        mutableStateOf<String?>(null)
     }
 
     val readerState by readerViewModel.uiState.collectAsStateWithLifecycle()
@@ -189,12 +200,14 @@ fun MainAppContent(
         }
     }
 
-    // Load initial PDF if provided via Intent
+    // Load initial or new-intent PDF if provided via Intent
     LaunchedEffect(initialPdfUri) {
         if (initialPdfUri != null) {
             PdfDocumentStorage.takePersistablePermissionSafely(context, initialPdfUri)
-            currentPdfUriString = initialPdfUri.toString()
-            readerViewModel.loadPdf(initialPdfUri)
+            val resolved = homeViewModel.resolveIdentityUri(initialPdfUri)
+            currentPdfUriString = resolved.toString()
+            readerViewModel.loadPdf(resolved)
+            onIntentUriConsumed()
         }
     }
 
@@ -203,8 +216,11 @@ fun MainAppContent(
     ) { uri: Uri? ->
         if (uri != null) {
             PdfDocumentStorage.takePersistablePermissionSafely(context, uri)
-            currentPdfUriString = uri.toString()
-            readerViewModel.loadPdf(uri)
+            scope.launch {
+                val resolved = homeViewModel.resolveIdentityUri(uri)
+                currentPdfUriString = resolved.toString()
+                readerViewModel.loadPdf(resolved)
+            }
         }
     }
 
@@ -235,8 +251,11 @@ fun MainAppContent(
                 viewModel = homeViewModel,
                 onOpenPdfUri = { uri ->
                     PdfDocumentStorage.takePersistablePermissionSafely(context, uri)
-                    currentPdfUriString = uri.toString()
-                    readerViewModel.loadPdf(uri)
+                    scope.launch {
+                        val resolved = homeViewModel.resolveIdentityUri(uri)
+                        currentPdfUriString = resolved.toString()
+                        readerViewModel.loadPdf(resolved)
+                    }
                 },
                 onLaunchFilePicker = {
                     try {

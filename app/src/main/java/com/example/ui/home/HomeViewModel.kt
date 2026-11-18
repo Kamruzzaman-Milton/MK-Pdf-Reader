@@ -19,6 +19,7 @@ import com.example.data.settings.RecentViewMode
 import com.example.data.settings.SettingsRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -48,7 +49,26 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     init {
         viewModelScope.launch(Dispatchers.IO) {
             repository.syncRecentsOnStartup()
+            relinkBrokenRecents()
             warmUpOutlines()
+        }
+    }
+
+    private suspend fun relinkBrokenRecents() {
+        try {
+            val recents = repository.getRecentPDFs()
+            for (item in recents) {
+                if (!currentCoroutineContext().isActive) break
+                val uriStr = item.uriString
+                if (uriStr.isBlank()) continue
+                try {
+                    repository.tryRelink(Uri.parse(uriStr))
+                } catch (_: Throwable) {
+                    // Ignore failures silently; never delete recents
+                }
+            }
+        } catch (_: Throwable) {
+            // Ignore failures silently
         }
     }
 
@@ -119,6 +139,10 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             repository.reloadRecentsFromDirectory()
         }
+    }
+
+    suspend fun resolveIdentityUri(uri: Uri): Uri {
+        return repository.resolveIdentityUri(uri)
     }
 
     private val _isGeneratingSample = MutableStateFlow(false)

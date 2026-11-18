@@ -179,8 +179,17 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
             // Clean up previous engine if any
             engine?.close()
 
-            val newEngine = PdfRendererEngine(getApplication(), uri)
-            val initialized = newEngine.initialize()
+            var newEngine = PdfRendererEngine(getApplication(), uri)
+            var initialized = newEngine.initialize()
+
+            if (!initialized || newEngine.pageCount == 0) {
+                newEngine.close()
+                val relinked = repository.tryRelink(uri)
+                if (relinked) {
+                    newEngine = PdfRendererEngine(getApplication(), uri)
+                    initialized = newEngine.initialize()
+                }
+            }
 
             if (!initialized || newEngine.pageCount == 0) {
                 outlineJob?.cancel()

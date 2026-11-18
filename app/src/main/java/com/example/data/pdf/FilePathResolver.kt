@@ -169,4 +169,37 @@ object FilePathResolver {
             null
         }
     }
+
+    fun resolveTreeUriToPath(treeUri: Uri): String? {
+        val authority = treeUri.authority ?: return null
+        if (!authority.equals("com.android.externalstorage.documents", ignoreCase = true)) {
+            return null
+        }
+        val docId = try {
+            DocumentsContract.getTreeDocumentId(treeUri)
+        } catch (e: Exception) {
+            return null
+        }
+        return resolveExternalDocIdToPath(docId)
+    }
+
+    fun resolveExternalDocIdToPath(docId: String): String? {
+        if (docId.isBlank()) return null
+        if (docId.startsWith("raw:", ignoreCase = true)) {
+            val raw = docId.substring(4).trimEnd('/')
+            return raw.ifEmpty { "/" }
+        }
+        val colonIdx = docId.indexOf(':')
+        if (colonIdx == -1) return null
+        val type = docId.substring(0, colonIdx)
+        val relativePath = docId.substring(colonIdx + 1).trimStart('/').trimEnd('/')
+        return if (type.equals("primary", ignoreCase = true)) {
+            val root = "/storage/emulated/0"
+            if (relativePath.isEmpty()) root else "$root/$relativePath"
+        } else if (type.isNotBlank()) {
+            if (relativePath.isEmpty()) "/storage/$type" else "/storage/$type/$relativePath"
+        } else {
+            null
+        }
+    }
 }

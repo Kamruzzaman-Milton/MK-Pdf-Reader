@@ -9,6 +9,7 @@ import com.example.data.db.PdfBookmarkDao
 import com.example.data.db.PdfBookmarkEntity
 import com.example.data.db.PdfRecentDao
 import com.example.data.db.PdfRecentItem
+import com.example.data.library.LibraryRepository
 import com.example.data.pdf.FilePathResolver
 import com.example.data.pdf.PdfDirectoryStorage
 import com.example.data.pdf.PdfDocumentInfo
@@ -34,10 +35,11 @@ import java.io.FileOutputStream
  * never lost across app restarts or crashes, with zero storage bloat.
  */
 class PdfRepository(
-    private val context: Context,
+    context: Context,
     private val pdfRecentDao: PdfRecentDao,
     private val pdfBookmarkDao: PdfBookmarkDao
 ) {
+    private val context: Context = context.applicationContext
     private val tag = "PdfRepository"
 
     private val _recentPdfsFlow = MutableStateFlow<List<PdfRecentItem>>(emptyList())
@@ -230,11 +232,25 @@ class PdfRepository(
 
             Log.d(tag, "addRecent called: pdfPath=$pdfPath, name=$displayName, time=$now")
 
+            val parsedUri = try { Uri.parse(uriString) } catch (_: Exception) { null }
+            val existingDir = parsedUri?.let { PdfDirectoryStorage.findDirectoryEntry(context, it) }
+            val existingRecent = pdfRecentDao.getRecentByUri(uriString) ?: pdfRecentDao.getRecentByPath(pdfPath)
+
+            val resolvedAbsPath = when {
+                pdfPath.startsWith("/") -> pdfPath
+                parsedUri != null -> FilePathResolver.resolvePath(context, parsedUri)?.takeIf { it.startsWith("/") }
+                    ?: existingDir?.path?.takeIf { it.startsWith("/") }
+                    ?: existingRecent?.localFilePath?.takeIf { it.startsWith("/") }
+                else -> existingDir?.path?.takeIf { it.startsWith("/") }
+                    ?: existingRecent?.localFilePath?.takeIf { it.startsWith("/") }
+            }
+            val effectivePdfPath = if (pdfPath.startsWith("/")) pdfPath else (resolvedAbsPath ?: pdfPath)
+
             // 1. Write to dedicated `pdf_directories/` folder (never purged, zero storage bloat)
             val docKey = try {
                 PdfDocumentStorage.getDocumentKey(Uri.parse(uriString))
             } catch (e: Exception) {
-                "doc_${Math.abs(pdfPath.hashCode())}"
+                "doc_${Math.abs(effectivePdfPath.hashCode())}"
             }
             PdfDirectoryStorage.saveDirectoryEntrySync(
                 context,
@@ -242,14 +258,15 @@ class PdfRepository(
                     docKey = docKey,
                     name = displayName,
                     uri = uriString,
-                    path = if (pdfPath.startsWith("/")) pdfPath else null,
+                    path = resolvedAbsPath,
                     time = now,
                     size = fileSize,
                     pageCount = pageCount,
                     lastReadPage = lastReadPage,
                     scroll = scrollOffset,
                     mode = readingMode.name,
-                    thumb = thumbnailPath
+                    thumb = thumbnailPath,
+                    mediaUri = existingDir?.mediaUri
                 )
             )
 
@@ -258,7 +275,7 @@ class PdfRepository(
                 context,
                 RecentPdfJsonStorage.RecentPdfJsonEntry(
                     name = displayName,
-                    path = pdfPath,
+                    path = effectivePdfPath,
                     time = now,
                     uri = uriString,
                     page = lastReadPage,
@@ -272,7 +289,7 @@ class PdfRepository(
 
             // 3. Write to SQLite atomically
             val item = PdfRecentItem(
-                pdf_path = pdfPath,
+                pdf_path = effectivePdfPath,
                 is_recent = true,
                 recent_timestamp = now,
                 uriString = uriString,
@@ -283,14 +300,14 @@ class PdfRepository(
                 scrollOffsetFraction = scrollOffset,
                 readingMode = readingMode.name,
                 thumbnailPath = thumbnailPath,
-                localFilePath = if (pdfPath.startsWith("/")) pdfPath else null
+                localFilePath = resolvedAbsPath
             )
             pdfRecentDao.insertOrUpdate(item)
 
             // Immediately emit updated directory list to Flow for instant UI updates
             reloadRecentsFromDirectory()
 
-            Log.d(tag, "addRecent finished: Persisted to dedicated pdf_directories, SQLite and JSON for $pdfPath")
+            Log.d(tag, "addRecent finished: Persisted to dedicated pdf_directories, SQLite and JSON for $effectivePdfPath")
         } catch (e: Exception) {
             Log.e(tag, "Failed to persist recent PDF $pdfPath", e)
         }
@@ -384,7 +401,9 @@ class PdfRepository(
         readingMode: ReadingMode,
         thumbnailBitmap: Bitmap? = null
     ) = withContext(Dispatchers.IO) {
-        val resolvedPath = FilePathResolver.resolvePath(context, uri)
+        val resolvedPath = FilePathResolver.resolvePath(context, uri)?.takeIf { it.startsWith("/") }
+            ?: PdfDirectoryStorage.findDirectoryEntry(context, uri)?.path?.takeIf { it.startsWith("/") }
+            ?: pdfRecentDao.getRecentByUri(uri.toString())?.localFilePath?.takeIf { it.startsWith("/") }
         val canonicalKey = resolvedPath ?: uri.toString()
 
         var thumbnailPath: String? = null
@@ -421,7 +440,10 @@ class PdfRepository(
      */
     fun recordDocumentResumed(uri: Uri, currentPage: Int, scrollOffset: Float, readingMode: ReadingMode) {
         try {
-            val resolvedPath = FilePathResolver.resolvePath(context, uri) ?: uri.toString()
+            val resolvedPath = FilePathResolver.resolvePath(context, uri)?.takeIf { it.startsWith("/") }
+                ?: PdfDirectoryStorage.findDirectoryEntry(context, uri)?.path?.takeIf { it.startsWith("/") }
+                ?: pdfRecentDao.getRecentByUri(uri.toString())?.localFilePath?.takeIf { it.startsWith("/") }
+                ?: uri.toString()
             val existing = pdfRecentDao.getRecentByPath(resolvedPath)
                 ?: pdfRecentDao.getRecentByUri(uri.toString())
 
@@ -451,7 +473,10 @@ class PdfRepository(
         scrollOffset: Float,
         readingMode: ReadingMode
     ) = withContext(Dispatchers.IO) {
-        val resolvedPath = FilePathResolver.resolvePath(context, uri) ?: uri.toString()
+        val resolvedPath = FilePathResolver.resolvePath(context, uri)?.takeIf { it.startsWith("/") }
+            ?: PdfDirectoryStorage.findDirectoryEntry(context, uri)?.path?.takeIf { it.startsWith("/") }
+            ?: pdfRecentDao.getRecentByUri(uri.toString())?.localFilePath?.takeIf { it.startsWith("/") }
+            ?: uri.toString()
         val existing = pdfRecentDao.getRecentByPath(resolvedPath)
             ?: pdfRecentDao.getRecentByUri(uri.toString())
 
@@ -467,6 +492,109 @@ class PdfRepository(
             thumbnailPath = existing?.thumbnailPath
         )
         Log.d(tag, "updateReadingProgress: Updated position page=$lastReadPage for $resolvedPath")
+    }
+
+    suspend fun resolveIdentityUri(uri: Uri): Uri = withContext(Dispatchers.IO) {
+        try {
+            val resolvedPath = FilePathResolver.resolvePath(context, uri)?.takeIf { it.startsWith("/") }
+                ?: return@withContext uri
+            val normalizedIncoming = resolvedPath.trimEnd('/')
+
+            val entries = PdfDirectoryStorage.loadAllDirectoriesSync(context)
+            val matchedEntry = entries.find { entry ->
+                !entry.path.isNullOrBlank() && entry.path.trimEnd('/').equals(normalizedIncoming, ignoreCase = false)
+            } ?: entries.find { entry ->
+                !entry.path.isNullOrBlank() && entry.path.trimEnd('/').equals(normalizedIncoming, ignoreCase = true)
+            }
+
+            if (matchedEntry != null && matchedEntry.uri.isNotBlank()) {
+                if (uri.scheme == "content" && uri.toString() != matchedEntry.uri && matchedEntry.mediaUri.isNullOrBlank()) {
+                    PdfDirectoryStorage.updateMediaUriSync(context, Uri.parse(matchedEntry.uri), uri)
+                }
+                return@withContext Uri.parse(matchedEntry.uri)
+            }
+
+            val recentByLocal = pdfRecentDao.getRecentByLocalPath(resolvedPath)
+            if (recentByLocal != null && recentByLocal.uriString.isNotBlank()) {
+                return@withContext Uri.parse(recentByLocal.uriString)
+            }
+        } catch (e: Exception) {
+            Log.w(tag, "resolveIdentityUri failed for $uri: ${e.message}")
+        }
+        uri
+    }
+
+    suspend fun tryRelink(uri: Uri): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val uriStr = uri.toString()
+            val dirEntry = PdfDirectoryStorage.findDirectoryEntry(context, uri)
+            val recent = pdfRecentDao.getRecentByUri(uriStr) ?: pdfRecentDao.getRecentByPath(uriStr)
+
+            val fileName = dirEntry?.name?.takeIf { it.isNotBlank() && it != "Document.pdf" }
+                ?: recent?.fileName?.takeIf { it.isNotBlank() && it != "Document.pdf" }
+                ?: return@withContext false
+            val fileSize = dirEntry?.size ?: recent?.fileSize ?: 0L
+            if (fileSize <= 0L) return@withContext false
+
+            val existingPfd = PdfDocumentStorage.openFileDescriptor(context, uri).first
+            if (existingPfd != null) {
+                try { existingPfd.close() } catch (_: Exception) {}
+                return@withContext false
+            }
+
+            val hit = LibraryRepository.getInstance(context).findByNameAndSize(fileName, fileSize)
+                ?: return@withContext false
+
+            val newPath = hit.path?.takeIf { it.startsWith("/") }
+            val newMediaUri = hit.uri.takeIf { it.startsWith("content://") }
+                ?: newPath?.let { PdfDocumentStorage.findMediaStoreUriForPath(context, it, fileName, fileSize)?.toString() }
+
+            if (newPath == null && newMediaUri == null) return@withContext false
+
+            if (dirEntry != null) {
+                val updatedDirPath = newPath?.let { p ->
+                    try { File(p).parent } catch (_: Exception) { null }
+                } ?: dirEntry.directoryPath
+                PdfDirectoryStorage.saveDirectoryEntrySync(
+                    context,
+                    dirEntry.copy(
+                        path = newPath ?: dirEntry.path,
+                        directoryPath = updatedDirPath,
+                        mediaUri = newMediaUri ?: dirEntry.mediaUri
+                    )
+                )
+            } else if (recent != null) {
+                val docKey = PdfDocumentStorage.getDocumentKey(Uri.parse(recent.uriString))
+                PdfDirectoryStorage.saveDirectoryEntrySync(
+                    context,
+                    PdfDirectoryStorage.PdfDirectoryEntry(
+                        docKey = docKey,
+                        name = recent.fileName.ifBlank { fileName },
+                        uri = recent.uriString,
+                        path = newPath ?: recent.localFilePath,
+                        time = recent.recent_timestamp,
+                        size = recent.fileSize,
+                        pageCount = recent.pageCount,
+                        lastReadPage = recent.lastReadPage,
+                        scroll = recent.scrollOffsetFraction,
+                        mode = recent.readingMode,
+                        thumb = recent.thumbnailPath,
+                        mediaUri = newMediaUri
+                    )
+                )
+            }
+
+            if (recent != null && newPath != null) {
+                pdfRecentDao.insertOrUpdate(recent.copy(localFilePath = newPath))
+            }
+
+            reloadRecentsFromDirectory()
+            Log.d(tag, "tryRelink: Relinked '$fileName' ($uriStr) -> path=$newPath, mediaUri=$newMediaUri")
+            true
+        } catch (e: Exception) {
+            Log.w(tag, "tryRelink failed for $uri: ${e.message}")
+            false
+        }
     }
 
     suspend fun deleteRecent(pathOrUri: String) = withContext(Dispatchers.IO) {

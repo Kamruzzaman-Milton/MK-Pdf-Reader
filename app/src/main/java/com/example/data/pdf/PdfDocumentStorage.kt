@@ -230,6 +230,21 @@ object PdfDocumentStorage {
             } catch (ignored: Exception) {}
         }
 
+        // Open dirEntry.path directly when File.canRead()
+        val entryPath = dirEntry?.path?.takeIf { it.isNotBlank() }
+        if (entryPath != null) {
+            try {
+                val entryFile = File(entryPath)
+                if (entryFile.exists() && entryFile.canRead()) {
+                    val pfd = ParcelFileDescriptor.open(entryFile, ParcelFileDescriptor.MODE_READ_ONLY)
+                    Log.d(TAG, "Opened PDF directly from saved directory entry path: ${entryFile.absolutePath}")
+                    return@withContext Pair(pfd, entryFile)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed opening saved directory entry path: ${e.message}")
+            }
+        }
+
         // Strategy 5: FilePathResolver / Directory Entry path recovery
         val resolvedPath = dirEntry?.path
             ?: FilePathResolver.resolvePath(context, uri)
