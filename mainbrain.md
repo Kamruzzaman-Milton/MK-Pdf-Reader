@@ -397,7 +397,7 @@ MK PDF Reader **never copies opened PDFs into app storage** (preventing multi-GB
 | `warmFilterPercent` | `"warm_filter_percent"` | `Int` | `0` | `0..60` (amber `#FF8A00` overlay alpha `percent / 100f * 0.45f`) | `SettingsSheet` §7 |
 | `tapZoneNavigation` | `"tap_zone_navigation"` | `Boolean` | `false` | `true`, `false` | `SettingsSheet` §7 |
 | `volumeKeyNavigation` | `"volume_key_navigation"` | `Boolean` | `false` | `true`, `false` | `SettingsSheet` §7 |
-| `autoScrollSpeed` | `"auto_scroll_speed"` | `Int` | `3` | `1..10` (`speed * 30.dp.toPx()` / sec) | `SettingsSheet` §7 & `auto_scroll_pill` |
+| `autoScrollSpeed` | `"auto_scroll_speed"` | `Int` | `3` | `1..10` (`speed * 6.dp.toPx()` / sec) | `SettingsSheet` §7 & `auto_scroll_pill` |
 | `appAccent` | `"app_accent"` | `AppAccent` | `SCARLET` | `SCARLET`, `OCEAN` (`#1E88E5`/`#64B5F6`), `EMERALD` (`#2E7D32`/`#66BB6A`), `VIOLET` (`#7B1FA2`/`#CE93D8`), `AMBER` (`#EF6C00`/`#FFB74D`), `DYNAMIC` (API 31+) | `HomeSettingsSheet` §3 (`ACCENT COLOR`) |
 | `librarySort` | `"library_sort"` | `LibrarySort` | `RECENT` | `RECENT`, `NAME`, `SIZE`, `PROGRESS` | `LibraryFilterSortRow` (`library_sort_btn`) |
 | `libraryFilter` | `"library_filter"` | `LibraryFilter` | `ALL` | `ALL`, `IN_PROGRESS`, `FINISHED`, `FAVORITES` | `LibraryFilterSortRow` (`library_filter_<name>`) |
@@ -483,7 +483,7 @@ MK PDF Reader **never copies opened PDFs into app storage** (preventing multi-GB
      - Background tinted by `colorTone` (`#E9ECEF`, `#EDE3D2`, `#0D0D0D`, `#DCDCDC`).
      - Tap → when `tapZoneNavigation` is `true`, left 25% emits `stepPage(-1)`, right 25% emits `stepPage(1)`, middle 50% calls `toggleFullscreen()` (when `false`, any tap toggles fullscreen); Double-tap → `toggleDoubleTapZoom(...)`; Pinch/Drag → `updateZoomAndPan(...)` via `graphicsLayer`.
      - Collects `viewModel.navCommands` (`MutableSharedFlow<Int>`) from tap zones and `MainActivity` hardware volume keys (`VOLUME_DOWN` → `+1`, `VOLUME_UP` → `-1`), calling `animateScrollBy(delta * viewportHeight * 0.85f)` in `VERTICAL` mode or `animateScrollToPage((currentPage + delta).coerceIn(0, totalPages - 1))` in `HORIZONTAL` mode.
-     - Renders `LazyColumn` (`vertical_pdf_list`) when `ReadingMode.VERTICAL` (with `withFrameNanos` auto-scroll loop advancing `speed * 30.dp.toPx()`/sec, ~1/sec `recordUserActivity()` keep-awake pings, and `DragInteraction.Start` cancellation) or `HorizontalPager` (`horizontal_pdf_pager`) when `ReadingMode.HORIZONTAL`.
+     - Renders `LazyColumn` (`vertical_pdf_list`) when `ReadingMode.VERTICAL` (with `withFrameNanos` auto-scroll loop advancing `speed * 6.dp.toPx()`/sec, ~1/sec `recordUserActivity()` keep-awake pings, and `DragInteraction.Start` cancellation) or `HorizontalPager` (`horizontal_pdf_pager`) when `ReadingMode.HORIZONTAL`.
      - Each page is a `PdfPageView` (`pdf_page_<idx>`) applying draw-time `marginTrim` with an optional bottom-right page badge (`page_number_badge_<1-idx>`) that turns primary-colored with a Bookmark icon when bookmarked and toggles that page's bookmark on tap.
      - Final child overlay (when `warmFilterPercent > 0`): non-interactive `Box(Modifier.matchParentSize().drawBehind { drawRect(Color(0xFFFF8A00), alpha = warmFilterPercent / 100f * 0.45f) })` above pages and below bars.
    - **Top Bar Overlay (`ReaderTopBar`, animated slide+fade when `!isFullscreen`):**

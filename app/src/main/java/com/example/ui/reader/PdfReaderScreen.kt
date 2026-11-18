@@ -756,7 +756,7 @@ private fun ReaderViewport(
                         val frameNanos = withFrameNanos { it }
                         if (lastFrameNanos != 0L) {
                             val dt = (frameNanos - lastFrameNanos).coerceIn(0L, 100_000_000L)
-                            val pxPerSec = with(density) { currentAutoScrollSpeed * 30.dp.toPx() }
+                            val pxPerSec = with(density) { currentAutoScrollSpeed * 6.dp.toPx() }
                             val deltaPx = pxPerSec * dt / 1_000_000_000f
                             if (deltaPx > 0f) {
                                 val consumed = listState.scrollBy(deltaPx)
