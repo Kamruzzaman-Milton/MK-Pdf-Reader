@@ -57,6 +57,13 @@ class PdfRendererEngine(
         }
     }
 
+    // Separate 24 MB cache for Page Overview grid thumbnails
+    private val gridThumbCache = object : LruCache<Int, Bitmap>(24 * 1024 * 1024) {
+        override fun sizeOf(key: Int, bitmap: Bitmap): Int {
+            return bitmap.byteCount
+        }
+    }
+
     // Prefetch job tracking
     private var prefetchJob: Job? = null
 
@@ -343,11 +350,59 @@ class PdfRendererEngine(
         )
     }
 
+    suspend fun renderGridThumbnail(pageIndex: Int): Bitmap? = withContext(Dispatchers.IO) {
+        if (pageIndex < 0 || pageIndex >= pageCount) return@withContext null
+
+        gridThumbCache.get(pageIndex)?.let { cached ->
+            if (!cached.isRecycled) return@withContext cached
+        }
+
+        renderMutex.withLock {
+            gridThumbCache.get(pageIndex)?.let { cached ->
+                if (!cached.isRecycled) return@withLock cached
+            }
+
+            try {
+                val renderer = pdfRenderer ?: return@withLock null
+                val page = renderer.openPage(pageIndex)
+                val originalWidth = page.width
+                val originalHeight = page.height
+                val targetWidth = 200
+                val targetHeight = if (originalWidth > 0) {
+                    ((originalHeight.toFloat() / originalWidth.toFloat()) * targetWidth).roundToInt().coerceAtLeast(1)
+                } else {
+                    283
+                }
+
+                val bitmap = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
+                bitmap.eraseColor(Color.WHITE)
+
+                val matrix = Matrix()
+                matrix.postScale(targetWidth.toFloat() / originalWidth, targetHeight.toFloat() / originalHeight)
+
+                page.render(bitmap, null, matrix, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                page.close()
+
+                gridThumbCache.put(pageIndex, bitmap)
+                bitmap
+            } catch (e: OutOfMemoryError) {
+                Log.e(tag, "OutOfMemoryError rendering grid thumbnail for page $pageIndex", e)
+                gridThumbCache.evictAll()
+                System.gc()
+                null
+            } catch (e: Exception) {
+                Log.e(tag, "Exception rendering grid thumbnail for page $pageIndex", e)
+                null
+            }
+        }
+    }
+
     fun getCacheUsageBytes(): Int = memoryCache.size()
     fun getMaxCacheBytes(): Int = maxMemoryCacheBytes
 
     fun clearCache() {
         memoryCache.evictAll()
+        gridThumbCache.evictAll()
     }
 
     private fun closeInternal() {
@@ -379,6 +434,7 @@ class PdfRendererEngine(
         }
 
         memoryCache.evictAll()
+        gridThumbCache.evictAll()
     }
 
     fun close() {

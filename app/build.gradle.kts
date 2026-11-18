@@ -1,4 +1,12 @@
+import java.util.Base64
 import com.google.gms.googleservices.GoogleServicesPlugin.MissingGoogleServicesStrategy
+import org.gradle.api.DefaultTask
+import org.gradle.api.GradleException
+import org.gradle.api.file.RegularFileProperty
+import org.gradle.api.tasks.InputFile
+import org.gradle.api.tasks.Optional
+import org.gradle.api.tasks.OutputFile
+import org.gradle.api.tasks.TaskAction
 
 plugins {
   alias(libs.plugins.android.application)
@@ -21,6 +29,7 @@ android {
     versionName = "1.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
   }
 
   signingConfigs {
@@ -53,11 +62,17 @@ android {
   buildTypes {
     release {
       isCrunchPngs = false
-      isMinifyEnabled = false
+      isMinifyEnabled = true
+      isShrinkResources = true
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
       signingConfig = signingConfigs.getByName("release")
     }
-    debug { signingConfig = signingConfigs.getByName("debugConfig") }
+    debug {
+      isMinifyEnabled = true
+      isShrinkResources = true
+      proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+      signingConfig = signingConfigs.getByName("debugConfig")
+    }
   }
   compileOptions {
     sourceCompatibility = JavaVersion.VERSION_11
@@ -72,6 +87,12 @@ android {
     includeInApk = false
     includeInBundle = true
   }
+  androidResources { localeFilters += listOf("en") }
+  packaging {
+    resources {
+      excludes += setOf("/META-INF/{AL2.0,LGPL2.1}", "DebugProbesKt.bin", "kotlin-tooling-metadata.json")
+    }
+  }
 }
 
 // Configure the Secrets Gradle Plugin to use .env and .env.example files
@@ -84,11 +105,65 @@ secrets {
 
 googleServices { missingGoogleServicesStrategy = MissingGoogleServicesStrategy.WARN }
 
+abstract class SyncPersistentKeystoreTask : DefaultTask() {
+  @get:InputFile abstract val sourceBase64File: RegularFileProperty
+
+  @get:OutputFile abstract val targetKeystoreFile: RegularFileProperty
+
+  @get:Optional @get:OutputFile abstract val targetRootBase64File: RegularFileProperty
+
+  @TaskAction
+  fun sync() {
+    val rawBase64 = sourceBase64File.get().asFile.readText().trim()
+    if (rawBase64.isEmpty()) {
+      throw GradleException("Source keystore Base64 file is empty: ${sourceBase64File.get().asFile.path}")
+    }
+
+    val decodedBytes = Base64.getMimeDecoder().decode(rawBase64)
+    val keystoreFile = targetKeystoreFile.get().asFile
+    keystoreFile.parentFile?.mkdirs()
+    if (!keystoreFile.exists() || !keystoreFile.readBytes().contentEquals(decodedBytes)) {
+      keystoreFile.writeBytes(decodedBytes)
+    }
+
+    if (targetRootBase64File.isPresent) {
+      val normalizedBase64 = rawBase64.replace("\\s+".toRegex(), "") + "\n"
+      val rootBase64File = targetRootBase64File.get().asFile
+      rootBase64File.parentFile?.mkdirs()
+      if (!rootBase64File.exists() || rootBase64File.readText() != normalizedBase64) {
+        rootBase64File.writeText(normalizedBase64)
+      }
+    }
+  }
+}
+
+val persistentKeystoreBase64 =
+  layout.projectDirectory.file("signing/persistent-debug.keystore.base64")
+val rootKeystoreFile = rootProject.layout.projectDirectory.file("debug.keystore")
+val rootBase64File = rootProject.layout.projectDirectory.file("debug.keystore.base64")
+
+val syncPersistentKeystore =
+  tasks.register<SyncPersistentKeystoreTask>("syncPersistentKeystore") {
+    val persistentFile = persistentKeystoreBase64.asFile
+    if (persistentFile.exists() && persistentFile.readText().isNotBlank()) {
+      sourceBase64File.set(persistentKeystoreBase64)
+      targetRootBase64File.set(rootBase64File)
+    } else {
+      sourceBase64File.set(rootBase64File)
+    }
+    targetKeystoreFile.set(rootKeystoreFile)
+  }
+
+tasks.matching {
+  it.name == "preBuild" || it.name == "validateSigningDebug" || it.name == "packageDebug"
+}.configureEach {
+  dependsOn(syncPersistentKeystore)
+}
+
 // Some unused dependencies are commented out below instead of being removed.
 // This makes it easy to add them back in the future if needed.
 dependencies {
   implementation(platform(libs.androidx.compose.bom))
-  implementation(platform(libs.firebase.bom))
   // implementation(libs.accompanist.permissions)
   implementation(libs.androidx.activity.compose)
   // implementation(libs.androidx.camera.camera2)
@@ -110,8 +185,6 @@ dependencies {
   implementation(libs.androidx.room.ktx)
   implementation(libs.androidx.room.runtime)
   // implementation(libs.coil.compose)
-  implementation(libs.converter.moshi)
-  implementation(libs.firebase.ai)
   // Uncomment to use Firestore:
   // implementation(libs.firebase.firestore)
 
@@ -121,19 +194,12 @@ dependencies {
   // implementation(libs.androidx.credentials)
   // implementation(libs.androidx.credentials.play.services)
   // implementation(libs.googleid)
-  implementation(libs.firebase.appcheck.recaptcha)
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
-  implementation(libs.logging.interceptor)
-  implementation(libs.pdfbox.android)
   implementation("com.github.barteksc:pdfium-android:1.9.0") {
     exclude(group = "com.android.support")
   }
-  implementation("com.artifex.mupdf:fitz:1.24.4")
-  implementation(libs.moshi.kotlin)
-  implementation(libs.okhttp)
   // implementation(libs.play.services.location)
-  implementation(libs.retrofit)
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)
   testImplementation(libs.androidx.junit)
@@ -151,5 +217,4 @@ dependencies {
   debugImplementation(libs.androidx.compose.ui.test.manifest)
   debugImplementation(libs.androidx.compose.ui.tooling)
   "ksp"(libs.androidx.room.compiler)
-  "ksp"(libs.moshi.kotlin.codegen)
 }

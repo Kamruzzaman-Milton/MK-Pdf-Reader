@@ -511,11 +511,12 @@ class PdfRepository(
             pdfBookmarkDao.deleteBookmark(existing)
             false
         } else {
+            val resolvedTitle = title?.takeIf { it.isNotBlank() } ?: "Page ${pageIndex + 1}"
             val entity = PdfBookmarkEntity(
                 uriString = uriString,
                 pageIndex = pageIndex,
                 pageNumber = pageIndex + 1,
-                title = title ?: "Page ${pageIndex + 1}"
+                title = resolvedTitle
             )
             pdfBookmarkDao.insertBookmark(entity)
             true
@@ -527,9 +528,13 @@ class PdfRepository(
             uriString = uriString,
             pageIndex = pageIndex,
             pageNumber = pageIndex + 1,
-            title = title ?: "Page ${pageIndex + 1}"
+            title = title?.takeIf { it.isNotBlank() } ?: "Page ${pageIndex + 1}"
         )
         pdfBookmarkDao.insertBookmark(entity)
+    }
+
+    suspend fun updateBookmarkTitle(id: Long, title: String) = withContext(Dispatchers.IO) {
+        pdfBookmarkDao.updateTitle(id, title)
     }
 
     suspend fun deleteBookmark(bookmark: PdfBookmarkEntity) = withContext(Dispatchers.IO) {

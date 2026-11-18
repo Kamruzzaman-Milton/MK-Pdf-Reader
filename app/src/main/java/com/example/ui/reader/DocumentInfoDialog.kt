@@ -23,11 +23,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.R
 import com.example.data.pdf.PdfDocumentInfo
+import com.example.data.settings.ReadingStats
 import java.util.Locale
 
 @Composable
 fun DocumentInfoDialog(
     documentInfo: PdfDocumentInfo,
+    timeSpentMs: Long = 0L,
     onDismiss: () -> Unit
 ) {
     fun formatFileSize(bytes: Long): String {
@@ -67,6 +69,11 @@ fun DocumentInfoDialog(
                 InfoRow(
                     label = "Source",
                     value = if (documentInfo.isSample) "Demo Showcase PDF" else "Local Storage"
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                InfoRow(
+                    label = "Time Spent",
+                    value = ReadingStats.formatDuration(timeSpentMs)
                 )
             }
         },

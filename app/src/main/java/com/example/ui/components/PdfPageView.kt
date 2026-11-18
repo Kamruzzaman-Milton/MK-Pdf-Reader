@@ -3,7 +3,7 @@ package com.example.ui.components
 import android.graphics.Bitmap
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.Image
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.aspectRatio
@@ -36,17 +36,28 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.pdf.PdfRendererEngine
+import com.example.data.settings.MarginTrim
 import com.example.data.settings.PageColorTone
 import com.example.data.settings.RenderSharpness
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlin.math.roundToInt
+
+private fun computeTrimmedAspectRatio(pageRatio: Float, marginTrim: MarginTrim): Float {
+    val h = marginTrim.horizontalFraction
+    val v = marginTrim.verticalFraction
+    return pageRatio * (1f - 2f * v) / (1f - 2f * h)
+}
 
 @Composable
 fun PdfPageView(
@@ -58,7 +69,8 @@ fun PdfPageView(
     highQualityPrintMode: Boolean = true,
     showPageNumberBadge: Boolean = true,
     isBookmarked: Boolean = false,
-    onPageNumberClick: (() -> Unit)? = null
+    onPageNumberClick: (() -> Unit)? = null,
+    marginTrim: MarginTrim = MarginTrim.OFF
 ) {
     val aspectRatio = remember(pageIndex, engine) { engine.getPageAspectRatio(pageIndex) }
     val density = LocalDensity.current
@@ -112,6 +124,10 @@ fun PdfPageView(
         }
     }
 
+    val displayedAspectRatio = remember(aspectRatio, marginTrim) {
+        computeTrimmedAspectRatio(aspectRatio, marginTrim)
+    }
+
     val paperBackgroundColor = when (colorTone) {
         PageColorTone.ORIGINAL -> Color.White
         PageColorTone.SEPIA -> Color(0xFFFBF0D9)
@@ -122,7 +138,7 @@ fun PdfPageView(
     Surface(
         modifier = modifier
             .fillMaxWidth()
-            .aspectRatio(1f / aspectRatio)
+            .aspectRatio(1f / displayedAspectRatio)
             .shadow(elevation = 3.dp, shape = RoundedCornerShape(6.dp))
             .clip(RoundedCornerShape(6.dp)),
         color = paperBackgroundColor
@@ -133,13 +149,26 @@ fun PdfPageView(
         ) {
             val bitmap = pageBitmap
             if (bitmap != null && !bitmap.isRecycled) {
-                Image(
-                    bitmap = bitmap.asImageBitmap(),
-                    contentDescription = "PDF Page ${pageIndex + 1}",
-                    modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Fit,
-                    filterQuality = FilterQuality.High
-                )
+                val imageBitmap = remember(bitmap) { bitmap.asImageBitmap() }
+                Canvas(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .semantics { contentDescription = "PDF Page ${pageIndex + 1}" }
+                ) {
+                    val h = marginTrim.horizontalFraction
+                    val v = marginTrim.verticalFraction
+                    val srcX = (imageBitmap.width * h).roundToInt().coerceIn(0, (imageBitmap.width - 1).coerceAtLeast(0))
+                    val srcY = (imageBitmap.height * v).roundToInt().coerceIn(0, (imageBitmap.height - 1).coerceAtLeast(0))
+                    val srcW = (imageBitmap.width * (1f - 2f * h)).roundToInt().coerceIn(1, (imageBitmap.width - srcX).coerceAtLeast(1))
+                    val srcH = (imageBitmap.height * (1f - 2f * v)).roundToInt().coerceIn(1, (imageBitmap.height - srcY).coerceAtLeast(1))
+                    drawImage(
+                        image = imageBitmap,
+                        srcOffset = IntOffset(srcX, srcY),
+                        srcSize = IntSize(srcW, srcH),
+                        dstSize = IntSize(size.width.toInt().coerceAtLeast(1), size.height.toInt().coerceAtLeast(1)),
+                        filterQuality = FilterQuality.High
+                    )
+                }
             } else if (isLoading) {
                 Box(
                     modifier = Modifier

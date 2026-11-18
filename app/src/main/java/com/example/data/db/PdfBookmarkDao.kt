@@ -30,4 +30,7 @@ interface PdfBookmarkDao {
 
     @Query("DELETE FROM pdf_bookmarks WHERE uriString = :uriString")
     suspend fun deleteAllBookmarksForUri(uriString: String)
+
+    @Query("UPDATE pdf_bookmarks SET title = :title WHERE id = :id")
+    suspend fun updateTitle(id: Long, title: String)
 }

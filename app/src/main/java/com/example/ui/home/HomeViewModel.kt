@@ -6,18 +6,24 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.db.AppDatabase
 import com.example.data.db.PdfRecentItem
+import com.example.data.pdf.PdfDocumentStorage
 import com.example.data.pdf.SamplePdfGenerator
 import com.example.data.repository.PdfRepository
+import com.example.data.settings.AppAccent
 import com.example.data.settings.AppSettings
 import com.example.data.settings.AppThemeMode
+import com.example.data.settings.LibraryFilter
+import com.example.data.settings.LibrarySort
 import com.example.data.settings.RecentViewMode
 import com.example.data.settings.SettingsRepository
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import java.util.Locale
 
 class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -42,6 +48,33 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             initialValue = repository.getRecentPDFs()
         )
 
+    val visibleRecents: StateFlow<List<PdfRecentItem>> = combine(recentPdfs, appSettings) { items, settings ->
+        val filtered = when (settings.libraryFilter) {
+            LibraryFilter.ALL -> items
+            LibraryFilter.FINISHED -> items.filter { it.pageCount > 0 && it.lastReadPage >= it.pageCount - 1 }
+            LibraryFilter.IN_PROGRESS -> items.filter {
+                val isFinished = it.pageCount > 0 && it.lastReadPage >= it.pageCount - 1
+                it.lastReadPage > 0 && !isFinished
+            }
+            LibraryFilter.FAVORITES -> items.filter { item ->
+                val key = PdfDocumentStorage.getDocumentKey(Uri.parse(item.uriString))
+                key in settings.favoriteKeys
+            }
+        }
+        when (settings.librarySort) {
+            LibrarySort.RECENT -> filtered.sortedByDescending { it.recent_timestamp }
+            LibrarySort.NAME -> filtered.sortedBy { it.fileName.lowercase(Locale.ROOT) }
+            LibrarySort.SIZE -> filtered.sortedByDescending { it.fileSize }
+            LibrarySort.PROGRESS -> filtered.sortedByDescending {
+                if (it.pageCount > 0) it.lastReadPage.toFloat() / it.pageCount.toFloat() else 0f
+            }
+        }
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5000),
+        initialValue = emptyList()
+    )
+
     fun refreshRecents() {
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             repository.reloadRecentsFromDirectory()
@@ -63,6 +96,23 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setAppThemeMode(themeMode: AppThemeMode) {
         settingsRepository.updateAppThemeMode(themeMode)
+    }
+
+    fun setAppAccent(accent: AppAccent) {
+        settingsRepository.updateAppAccent(accent)
+    }
+
+    fun setLibrarySort(sort: LibrarySort) {
+        settingsRepository.updateLibrarySort(sort)
+    }
+
+    fun setLibraryFilter(filter: LibraryFilter) {
+        settingsRepository.updateLibraryFilter(filter)
+    }
+
+    fun toggleFavorite(item: PdfRecentItem) {
+        val key = PdfDocumentStorage.getDocumentKey(Uri.parse(item.uriString))
+        settingsRepository.toggleFavoriteKey(key)
     }
 
     fun removeRecent(pathOrUri: String) {

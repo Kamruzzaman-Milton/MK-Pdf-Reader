@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.view.KeyEvent
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -61,6 +62,7 @@ class MainActivity : ComponentActivity() {
 
     private val homeViewModel: HomeViewModel by viewModels()
     private val readerViewModel: PdfReaderViewModel by viewModels()
+    private var isReaderVisible: Boolean = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -76,7 +78,10 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             val appSettings by homeViewModel.appSettings.collectAsStateWithLifecycle()
-            MyApplicationTheme(appThemeMode = appSettings.appThemeMode) {
+            MyApplicationTheme(
+                appThemeMode = appSettings.appThemeMode,
+                appAccent = appSettings.appAccent
+            ) {
                 MainAppContent(
                     homeViewModel = homeViewModel,
                     readerViewModel = readerViewModel,
@@ -87,10 +92,38 @@ class MainActivity : ComponentActivity() {
                         } else {
                             window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                         }
+                    },
+                    onReaderVisibilityChanged = { visible ->
+                        isReaderVisible = visible
                     }
                 )
             }
         }
+    }
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        if (isReaderVisible && readerViewModel.appSettings.value.volumeKeyNavigation) {
+            when (keyCode) {
+                KeyEvent.KEYCODE_VOLUME_DOWN -> {
+                    readerViewModel.stepPage(1)
+                    return true
+                }
+                KeyEvent.KEYCODE_VOLUME_UP -> {
+                    readerViewModel.stepPage(-1)
+                    return true
+                }
+            }
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
+    override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {
+        if (isReaderVisible && readerViewModel.appSettings.value.volumeKeyNavigation) {
+            if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN || keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
+                return true
+            }
+        }
+        return super.onKeyUp(keyCode, event)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -129,7 +162,8 @@ fun MainAppContent(
     homeViewModel: HomeViewModel,
     readerViewModel: PdfReaderViewModel,
     initialPdfUri: Uri? = null,
-    onKeepScreenAwakeChange: (Boolean) -> Unit = {}
+    onKeepScreenAwakeChange: (Boolean) -> Unit = {},
+    onReaderVisibilityChanged: (Boolean) -> Unit = {}
 ) {
     val context = LocalContext.current
     var currentPdfUriString by rememberSaveable {
@@ -137,6 +171,10 @@ fun MainAppContent(
     }
 
     val readerState by readerViewModel.uiState.collectAsStateWithLifecycle()
+
+    LaunchedEffect(currentPdfUriString) {
+        onReaderVisibilityChanged(currentPdfUriString != null)
+    }
 
     // Manage screen keep-awake flag
     LaunchedEffect(currentPdfUriString, readerState.isScreenWakeActive) {
@@ -146,6 +184,7 @@ fun MainAppContent(
 
     DisposableEffect(Unit) {
         onDispose {
+            onReaderVisibilityChanged(false)
             onKeepScreenAwakeChange(false)
         }
     }

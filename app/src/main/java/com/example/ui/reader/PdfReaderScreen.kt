@@ -21,8 +21,11 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -47,21 +50,29 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Toc
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.BookmarkBorder
 import androidx.compose.material.icons.filled.BrightnessLow
 import androidx.compose.material.icons.filled.BrightnessMedium
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
+import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.StayCurrentLandscape
 import androidx.compose.material.icons.filled.StayCurrentPortrait
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.ViewCarousel
 import androidx.compose.material.icons.filled.ViewDay
 import androidx.compose.material.icons.filled.WbSunny
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilledTonalIconButton
@@ -82,30 +93,40 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
+import com.example.data.pdf.PdfDocumentStorage
 import com.example.data.pdf.ReadingMode
 import com.example.data.settings.AppSettings
 import com.example.data.settings.PageColorTone
 import com.example.data.settings.ReaderOrientation
+import com.example.data.settings.ReadingStats
 import com.example.ui.components.PdfPageView
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlin.math.roundToInt
 
 fun Context.findActivity(): Activity? {
@@ -152,6 +173,23 @@ fun PdfReaderScreen(
         activity.window.attributes = lp
     }
 
+    // Track foreground state for accurate reading time stats
+    val readerLifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(readerLifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> viewModel.setForeground(true)
+                Lifecycle.Event.ON_PAUSE -> viewModel.setForeground(false)
+                else -> {}
+            }
+        }
+        readerLifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            readerLifecycleOwner.lifecycle.removeObserver(observer)
+            viewModel.setForeground(false)
+        }
+    }
+
     // Reset orientation, brightness and keep-awake when exiting reader
     DisposableEffect(Unit) {
         val activity = context.findActivity()
@@ -190,6 +228,8 @@ fun PdfReaderScreen(
     BackHandler {
         if (uiState.isFullscreen) {
             viewModel.toggleFullscreen()
+        } else if (uiState.showPageOverview) {
+            viewModel.showPageOverview(false)
         } else if (uiState.showBookmarksSheet) {
             viewModel.showBookmarksSheet(false)
         } else if (uiState.showIndexSheet) {
@@ -215,8 +255,13 @@ fun PdfReaderScreen(
     }
 
     if (uiState.showInfoDialog && uiState.documentInfo != null) {
+        val docInfo = uiState.documentInfo!!
+        val timeSpentMs = remember(uiState.showInfoDialog, docInfo.uri) {
+            ReadingStats.totalFor(context, PdfDocumentStorage.getDocumentKey(docInfo.uri))
+        }
         DocumentInfoDialog(
-            documentInfo = uiState.documentInfo!!,
+            documentInfo = docInfo,
+            timeSpentMs = timeSpentMs,
             onDismiss = { viewModel.showInfoDialog(false) }
         )
     }
@@ -236,7 +281,12 @@ fun PdfReaderScreen(
             onUpdateOrientation = { viewModel.setOrientation(it) },
             onUpdateHighQualityPrintMode = { viewModel.updateHighQualityPrintMode(it) },
             onUpdateDoubleTapZoomMode = { viewModel.updateDoubleTapZoomMode(it) },
-            onClearCache = { viewModel.clearCache() }
+            onClearCache = { viewModel.clearCache() },
+            onUpdateMarginTrim = { viewModel.updateMarginTrim(it) },
+            onUpdateWarmFilterPercent = { viewModel.updateWarmFilterPercent(it) },
+            onUpdateTapZoneNavigation = { viewModel.updateTapZoneNavigation(it) },
+            onUpdateVolumeKeyNavigation = { viewModel.updateVolumeKeyNavigation(it) },
+            onUpdateAutoScrollSpeed = { viewModel.updateAutoScrollSpeed(it) }
         )
     }
 
@@ -249,6 +299,7 @@ fun PdfReaderScreen(
             onDismiss = { viewModel.showBookmarksSheet(false) },
             onJumpToPage = { pageNum -> viewModel.jumpToPage(pageNum) },
             onDeleteBookmark = { bookmark -> viewModel.deleteBookmark(bookmark) },
+            onRenameBookmark = { bookmark, newTitle -> viewModel.renameBookmark(bookmark, newTitle) },
             onToggleCurrentPageBookmark = { viewModel.toggleBookmarkCurrentPage() }
         )
     }
@@ -266,6 +317,18 @@ fun PdfReaderScreen(
             onSetAllExpanded = { ids, isExpanded -> viewModel.setAllIndexExpanded(ids, isExpanded) },
             onSaveScrollPosition = { index, offset -> viewModel.saveIndexScrollPosition(index, offset) },
             onDismiss = { viewModel.showIndexSheet(false) },
+            onJumpToPage = { pageNum -> viewModel.jumpToPage(pageNum) }
+        )
+    }
+
+    if (uiState.showPageOverview && engine != null && uiState.totalPages > 0) {
+        PageOverviewSheet(
+            engine = engine,
+            totalPages = uiState.totalPages,
+            currentPage = uiState.currentPage,
+            bookmarkedPages = uiState.bookmarkedPages,
+            documentTitle = uiState.documentInfo?.fileName ?: "Page Overview",
+            onDismiss = { viewModel.showPageOverview(false) },
             onJumpToPage = { pageNum -> viewModel.jumpToPage(pageNum) }
         )
     }
@@ -395,11 +458,10 @@ fun PdfReaderScreen(
             ReaderViewport(
                 viewModel = viewModel,
                 uiState = uiState,
-                appSettings = appSettings,
                 engine = engine
             )
 
-            // Top Bar Overlay (Unchanged: Back, Title, Reset Zoom, Settings, Doc Info, Fullscreen)
+            // Top Bar Overlay (Back, Title, Reset Zoom, Settings, Doc Info, Fullscreen, More)
             AnimatedVisibility(
                 visible = !uiState.isFullscreen,
                 enter = slideInVertically(initialOffsetY = { -it }) + fadeIn(),
@@ -416,39 +478,115 @@ fun PdfReaderScreen(
                     onResetZoom = { viewModel.resetZoom() },
                     onOpenSettings = { viewModel.showSettingsSheet(true) },
                     onFullscreenClick = { viewModel.toggleFullscreen() },
-                    onInfoClick = { viewModel.showInfoDialog(true) }
+                    onInfoClick = { viewModel.showInfoDialog(true) },
+                    readingMode = uiState.readingMode,
+                    isAutoScrolling = uiState.isAutoScrolling,
+                    onOpenPageOverview = { viewModel.showPageOverview(true) },
+                    onToggleAutoScroll = { viewModel.toggleAutoScrolling() }
                 )
             }
 
-            // Bottom Bar Overlay: Pages | Orientation | Page X/Y | Bookmark | Index + Brightness Control
-            AnimatedVisibility(
-                visible = !uiState.isFullscreen,
-                enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
-                exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
-                modifier = Modifier.align(Alignment.BottomCenter)
+            // Bottom Overlay: Auto-Scroll Pill + ReaderBottomBar
+            Column(
+                modifier = Modifier.align(Alignment.BottomCenter),
+                horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                ReaderBottomBar(
-                    currentPage = uiState.currentPage + 1,
-                    totalPages = uiState.totalPages,
-                    readingMode = uiState.readingMode,
-                    currentOrientation = uiState.currentOrientation,
-                    isBookmarked = uiState.isCurrentPageBookmarked,
-                    bookmarkCount = uiState.bookmarks.size,
-                    brightnessLevel = uiState.brightnessLevel,
-                    onPageSeek = { targetPage1Indexed ->
-                        viewModel.jumpToPage(targetPage1Indexed)
-                    },
-                    onOpenJumpDialog = { viewModel.showJumpDialog(true) },
-                    onToggleReadingMode = { viewModel.toggleReadingMode() },
-                    onCycleOrientation = {
-                        val newOrient = viewModel.cycleOrientation()
-                        orientationFeedbackText = newOrient.displayName
-                    },
-                    onToggleBookmark = { viewModel.toggleBookmarkCurrentPage() },
-                    onOpenBookmarksList = { viewModel.showBookmarksSheet(true) },
-                    onOpenIndex = { viewModel.showIndexSheet(true) },
-                    onBrightnessChange = { viewModel.setBrightness(it) }
-                )
+                AnimatedVisibility(
+                    visible = uiState.isAutoScrolling,
+                    enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
+                    exit = slideOutVertically(targetOffsetY = { it }) + fadeOut()
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(24.dp),
+                        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
+                        tonalElevation = 6.dp,
+                        shadowElevation = 6.dp,
+                        modifier = Modifier
+                            .padding(bottom = 10.dp)
+                            .then(if (uiState.isFullscreen) Modifier.navigationBarsPadding() else Modifier)
+                            .testTag("auto_scroll_pill")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            IconButton(
+                                onClick = { viewModel.updateAutoScrollSpeed(appSettings.autoScrollSpeed - 1) },
+                                enabled = appSettings.autoScrollSpeed > 1,
+                                modifier = Modifier.testTag("auto_scroll_slower_btn")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Remove,
+                                    contentDescription = "Decrease auto-scroll speed"
+                                )
+                            }
+
+                            Text(
+                                text = "${appSettings.autoScrollSpeed}x",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.padding(horizontal = 6.dp)
+                            )
+
+                            IconButton(
+                                onClick = { viewModel.updateAutoScrollSpeed(appSettings.autoScrollSpeed + 1) },
+                                enabled = appSettings.autoScrollSpeed < 10,
+                                modifier = Modifier.testTag("auto_scroll_faster_btn")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Add,
+                                    contentDescription = "Increase auto-scroll speed"
+                                )
+                            }
+
+                            FilledTonalButton(
+                                onClick = { viewModel.setAutoScrolling(false) },
+                                shape = RoundedCornerShape(16.dp),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                modifier = Modifier.testTag("auto_scroll_stop_btn")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Stop,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Stop", style = MaterialTheme.typography.labelMedium)
+                            }
+                        }
+                    }
+                }
+
+                AnimatedVisibility(
+                    visible = !uiState.isFullscreen,
+                    enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
+                    exit = slideOutVertically(targetOffsetY = { it }) + fadeOut()
+                ) {
+                    ReaderBottomBar(
+                        currentPage = uiState.currentPage + 1,
+                        totalPages = uiState.totalPages,
+                        readingMode = uiState.readingMode,
+                        currentOrientation = uiState.currentOrientation,
+                        isBookmarked = uiState.isCurrentPageBookmarked,
+                        bookmarkCount = uiState.bookmarks.size,
+                        brightnessLevel = uiState.brightnessLevel,
+                        onPageSeek = { targetPage1Indexed ->
+                            viewModel.jumpToPage(targetPage1Indexed)
+                        },
+                        onOpenJumpDialog = { viewModel.showJumpDialog(true) },
+                        onToggleReadingMode = { viewModel.toggleReadingMode() },
+                        onCycleOrientation = {
+                            val newOrient = viewModel.cycleOrientation()
+                            orientationFeedbackText = newOrient.displayName
+                        },
+                        onToggleBookmark = { viewModel.toggleBookmarkCurrentPage() },
+                        onOpenBookmarksList = { viewModel.showBookmarksSheet(true) },
+                        onOpenIndex = { viewModel.showIndexSheet(true) },
+                        onBrightnessChange = { viewModel.setBrightness(it) }
+                    )
+                }
             }
 
             // HUD Floating Pill (Orientation change or Bookmark confirmation feedback)
@@ -509,10 +647,22 @@ fun PdfReaderScreen(
 private fun ReaderViewport(
     viewModel: PdfReaderViewModel,
     uiState: PdfReaderUiState,
-    appSettings: AppSettings,
     engine: com.example.data.pdf.PdfRendererEngine
 ) {
+    val settings by viewModel.appSettings.collectAsStateWithLifecycle()
     val totalPages = uiState.totalPages
+    val sharpness = settings.sharpness
+    val colorTone = settings.colorTone
+    val highQualityPrintMode = settings.highQualityPrintMode
+    val showPageBadges = settings.showPageBadges
+    val pageSpacingDp = settings.pageSpacing.dpValue
+    val marginTrim = settings.marginTrim
+    val warmFilterPercent = settings.warmFilterPercent
+
+    val currentTapZoneNav by rememberUpdatedState(settings.tapZoneNavigation)
+    val currentAutoScrollSpeed by rememberUpdatedState(settings.autoScrollSpeed)
+    val currentIsAutoScrolling by rememberUpdatedState(uiState.isAutoScrolling)
+    val density = LocalDensity.current
 
     BoxWithConstraints(
         modifier = Modifier
@@ -527,8 +677,17 @@ private fun ReaderViewport(
                             viewHeight = size.height.toFloat()
                         )
                     },
-                    onTap = {
-                        viewModel.toggleFullscreen()
+                    onTap = { offset ->
+                        if (currentTapZoneNav && size.width > 0) {
+                            val fraction = offset.x / size.width.toFloat()
+                            when {
+                                fraction < 0.25f -> viewModel.stepPage(-1)
+                                fraction > 0.75f -> viewModel.stepPage(1)
+                                else -> viewModel.toggleFullscreen()
+                            }
+                        } else {
+                            viewModel.toggleFullscreen()
+                        }
                     }
                 )
             }
@@ -570,6 +729,49 @@ private fun ReaderViewport(
                     }
                 }
 
+                LaunchedEffect(listState) {
+                    viewModel.navCommands.collect { delta ->
+                        val viewportHeight = listState.layoutInfo.viewportSize.height
+                        if (viewportHeight > 0) {
+                            listState.animateScrollBy(delta * viewportHeight * 0.85f)
+                        }
+                    }
+                }
+
+                LaunchedEffect(listState) {
+                    listState.interactionSource.interactions.collect { interaction ->
+                        if (interaction is DragInteraction.Start && currentIsAutoScrolling) {
+                            viewModel.setAutoScrolling(false)
+                        }
+                    }
+                }
+
+                LaunchedEffect(uiState.isAutoScrolling, listState) {
+                    if (!uiState.isAutoScrolling) return@LaunchedEffect
+                    var lastFrameNanos = 0L
+                    var lastActivityPingNanos = 0L
+                    while (isActive) {
+                        val frameNanos = withFrameNanos { it }
+                        if (lastFrameNanos != 0L) {
+                            val dt = (frameNanos - lastFrameNanos).coerceIn(0L, 100_000_000L)
+                            val pxPerSec = with(density) { currentAutoScrollSpeed * 30.dp.toPx() }
+                            val deltaPx = pxPerSec * dt / 1_000_000_000f
+                            if (deltaPx > 0f) {
+                                val consumed = listState.scrollBy(deltaPx)
+                                if (consumed == 0f && !listState.canScrollForward) {
+                                    viewModel.setAutoScrolling(false)
+                                    break
+                                }
+                            }
+                        }
+                        lastFrameNanos = frameNanos
+                        if (lastActivityPingNanos == 0L || frameNanos - lastActivityPingNanos >= 1_000_000_000L) {
+                            lastActivityPingNanos = frameNanos
+                            viewModel.recordUserActivity()
+                        }
+                    }
+                }
+
                 LazyColumn(
                     state = listState,
                     modifier = Modifier
@@ -581,7 +783,7 @@ private fun ReaderViewport(
                         top = if (uiState.isFullscreen) 16.dp else 84.dp,
                         bottom = if (uiState.isFullscreen) 16.dp else 168.dp
                     ),
-                    verticalArrangement = Arrangement.spacedBy(appSettings.pageSpacing.dpValue),
+                    verticalArrangement = Arrangement.spacedBy(pageSpacingDp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     items(
@@ -591,14 +793,15 @@ private fun ReaderViewport(
                         PdfPageView(
                             pageIndex = pageIdx,
                             engine = engine,
-                            sharpness = appSettings.sharpness,
-                            colorTone = appSettings.colorTone,
-                            highQualityPrintMode = appSettings.highQualityPrintMode,
-                            showPageNumberBadge = appSettings.showPageBadges,
+                            sharpness = sharpness,
+                            colorTone = colorTone,
+                            highQualityPrintMode = highQualityPrintMode,
+                            showPageNumberBadge = showPageBadges,
                             isBookmarked = pageIdx in uiState.bookmarkedPages,
                             onPageNumberClick = {
                                 viewModel.toggleBookmarkPage(pageIdx)
                             },
+                            marginTrim = marginTrim,
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .testTag("pdf_page_$pageIdx")
@@ -624,6 +827,16 @@ private fun ReaderViewport(
                     }
                 }
 
+                val currentPageState by rememberUpdatedState(uiState.currentPage)
+                LaunchedEffect(pagerState, totalPages) {
+                    viewModel.navCommands.collect { delta ->
+                        if (totalPages > 0) {
+                            val target = (currentPageState + delta).coerceIn(0, totalPages - 1)
+                            pagerState.animateScrollToPage(target)
+                        }
+                    }
+                }
+
                 HorizontalPager(
                     state = pagerState,
                     modifier = Modifier
@@ -635,7 +848,7 @@ private fun ReaderViewport(
                         top = if (uiState.isFullscreen) 16.dp else 76.dp,
                         bottom = if (uiState.isFullscreen) 16.dp else 158.dp
                     ),
-                    pageSpacing = appSettings.pageSpacing.dpValue,
+                    pageSpacing = pageSpacingDp,
                     verticalAlignment = Alignment.CenterVertically
                 ) { pageIdx ->
                     Box(
@@ -645,14 +858,15 @@ private fun ReaderViewport(
                         PdfPageView(
                             pageIndex = pageIdx,
                             engine = engine,
-                            sharpness = appSettings.sharpness,
-                            colorTone = appSettings.colorTone,
-                            highQualityPrintMode = appSettings.highQualityPrintMode,
-                            showPageNumberBadge = appSettings.showPageBadges,
+                            sharpness = sharpness,
+                            colorTone = colorTone,
+                            highQualityPrintMode = highQualityPrintMode,
+                            showPageNumberBadge = showPageBadges,
                             isBookmarked = pageIdx in uiState.bookmarkedPages,
                             onPageNumberClick = {
                                 viewModel.toggleBookmarkPage(pageIdx)
                             },
+                            marginTrim = marginTrim,
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .testTag("pdf_page_$pageIdx")
@@ -660,6 +874,19 @@ private fun ReaderViewport(
                     }
                 }
             }
+        }
+
+        if (warmFilterPercent > 0) {
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .drawBehind {
+                        drawRect(
+                            color = Color(0xFFFF8A00),
+                            alpha = warmFilterPercent / 100f * 0.45f
+                        )
+                    }
+            )
         }
     }
 }
@@ -676,8 +903,13 @@ private fun ReaderTopBar(
     onResetZoom: () -> Unit,
     onOpenSettings: () -> Unit,
     onFullscreenClick: () -> Unit,
-    onInfoClick: () -> Unit
+    onInfoClick: () -> Unit,
+    readingMode: ReadingMode = ReadingMode.VERTICAL,
+    isAutoScrolling: Boolean = false,
+    onOpenPageOverview: () -> Unit = {},
+    onToggleAutoScroll: () -> Unit = {}
 ) {
+    var showMoreMenu by remember { mutableStateOf(false) }
     Surface(
         modifier = Modifier
             .fillMaxWidth()
@@ -762,6 +994,53 @@ private fun ReaderTopBar(
                         imageVector = Icons.Default.Fullscreen,
                         contentDescription = stringResource(R.string.fullscreen_reading)
                     )
+                }
+                Box {
+                    IconButton(
+                        onClick = { showMoreMenu = true },
+                        modifier = Modifier.testTag("reader_more_btn")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.MoreVert,
+                            contentDescription = "More options"
+                        )
+                    }
+                    DropdownMenu(
+                        expanded = showMoreMenu,
+                        onDismissRequest = { showMoreMenu = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Page Overview") },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Default.GridView,
+                                    contentDescription = null
+                                )
+                            },
+                            onClick = {
+                                showMoreMenu = false
+                                onOpenPageOverview()
+                            },
+                            modifier = Modifier.testTag("menu_page_overview")
+                        )
+                        DropdownMenuItem(
+                            text = {
+                                Text(if (isAutoScrolling) "Stop Auto-Scroll" else "Start Auto-Scroll")
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = if (isAutoScrolling) Icons.Default.Stop else Icons.Default.PlayArrow,
+                                    contentDescription = null
+                                )
+                            },
+                            enabled = readingMode == ReadingMode.VERTICAL,
+                            onClick = {
+                                showMoreMenu = false
+                                onToggleAutoScroll()
+                            },
+                            modifier = Modifier.testTag("menu_auto_scroll")
+                        )
+                    }
                 }
             }
         )

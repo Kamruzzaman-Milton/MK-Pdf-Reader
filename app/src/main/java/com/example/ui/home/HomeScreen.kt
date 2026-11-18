@@ -14,6 +14,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -30,17 +31,22 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.MenuBook
+import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.AutoStories
 import androidx.compose.material.icons.filled.BrightnessAuto
 import androidx.compose.material.icons.filled.Check
@@ -56,18 +62,22 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.ViewList
 import androidx.compose.runtime.DisposableEffect
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -85,6 +95,8 @@ import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.dynamicDarkColorScheme
+import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -112,11 +124,17 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.data.db.PdfRecentItem
+import com.example.data.pdf.PdfDocumentStorage
+import com.example.data.settings.AppAccent
 import com.example.data.settings.AppSettings
 import com.example.data.settings.AppThemeMode
+import com.example.data.settings.LibraryFilter
+import com.example.data.settings.LibrarySort
+import com.example.data.settings.ReadingStats
 import com.example.data.settings.RecentViewMode
 import java.io.File
 import java.util.Locale
+import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -127,6 +145,7 @@ fun HomeScreen(
     modifier: Modifier = Modifier
 ) {
     val recentPdfs by viewModel.recentPdfs.collectAsStateWithLifecycle()
+    val visibleRecents by viewModel.visibleRecents.collectAsStateWithLifecycle()
     val appSettings by viewModel.appSettings.collectAsStateWithLifecycle()
     val isGeneratingSample by viewModel.isGeneratingSample.collectAsStateWithLifecycle()
 
@@ -137,8 +156,10 @@ fun HomeScreen(
     var searchQuery by remember { mutableStateOf("") }
     val searchFocusRequester = remember { FocusRequester() }
 
-    val context = androidx.compose.ui.platform.LocalContext.current
+    val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    var todayMs by remember { mutableStateOf(ReadingStats.todayMs(context)) }
+    var streakDays by remember { mutableStateOf(ReadingStats.streakDays(context)) }
     var hasFullStorageAccess by remember {
         mutableStateOf(
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -154,6 +175,8 @@ fun HomeScreen(
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 viewModel.refreshRecents()
+                todayMs = ReadingStats.todayMs(context)
+                streakDays = ReadingStats.streakDays(context)
                 val hasAccess = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                     Environment.isExternalStorageManager()
                 } else {
@@ -196,12 +219,16 @@ fun HomeScreen(
         searchQuery = ""
     }
 
-    val filteredPdfs = remember(recentPdfs, searchQuery) {
+    val filteredPdfs = remember(visibleRecents, searchQuery) {
         if (searchQuery.isBlank()) {
-            recentPdfs
+            visibleRecents
         } else {
-            recentPdfs.filter { it.fileName.contains(searchQuery.trim(), ignoreCase = true) }
+            visibleRecents.filter { it.fileName.contains(searchQuery.trim(), ignoreCase = true) }
         }
+    }
+
+    val latestPdf = remember(recentPdfs) {
+        recentPdfs.maxByOrNull { it.recent_timestamp }
     }
 
     Scaffold(
@@ -275,7 +302,7 @@ fun HomeScreen(
                                 Icon(
                                     imageVector = Icons.Default.PictureAsPdf,
                                     contentDescription = null,
-                                    tint = Color.White,
+                                    tint = MaterialTheme.colorScheme.onPrimary,
                                     modifier = Modifier.size(22.dp)
                                 )
                             }
@@ -421,13 +448,34 @@ fun HomeScreen(
                         }
                     }
 
+                    if (latestPdf != null && !isSearchActive) {
+                        item(span = { GridItemSpan(maxLineSpan) }) {
+                            ContinueReadingSection(
+                                item = latestPdf,
+                                todayMs = todayMs,
+                                streakDays = streakDays,
+                                onResume = { onOpenItem(latestPdf) }
+                            )
+                        }
+                    }
+
                     // Header Section
                     item(span = { GridItemSpan(maxLineSpan) }) {
                         RecentHeaderRow(
                             isSearchActive = isSearchActive,
                             searchQuery = searchQuery,
-                            recentCount = recentPdfs.size,
+                            recentCount = visibleRecents.size,
                             filteredCount = filteredPdfs.size
+                        )
+                    }
+
+                    // Filter & Sort Row
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        LibraryFilterSortRow(
+                            currentFilter = appSettings.libraryFilter,
+                            currentSort = appSettings.librarySort,
+                            onSelectFilter = { viewModel.setLibraryFilter(it) },
+                            onSelectSort = { viewModel.setLibrarySort(it) }
                         )
                     }
 
@@ -442,16 +490,28 @@ fun HomeScreen(
                         }
                     } else if (filteredPdfs.isEmpty()) {
                         item(span = { GridItemSpan(maxLineSpan) }) {
-                            NoSearchResultsView(searchQuery = searchQuery)
+                            if (searchQuery.isNotBlank()) {
+                                NoSearchResultsView(searchQuery = searchQuery)
+                            } else {
+                                NoFilterResultsView(
+                                    filter = appSettings.libraryFilter,
+                                    onShowAll = { viewModel.setLibraryFilter(LibraryFilter.ALL) }
+                                )
+                            }
                         }
                     } else {
                         items(
                             items = filteredPdfs,
                             key = { it.uriString }
                         ) { item ->
+                            val isFav = remember(item.uriString, appSettings.favoriteKeys) {
+                                PdfDocumentStorage.getDocumentKey(Uri.parse(item.uriString)) in appSettings.favoriteKeys
+                            }
                             RecentPdfGridCard(
                                 item = item,
+                                isFavorite = isFav,
                                 onClick = { onOpenItem(item) },
+                                onToggleFavorite = { viewModel.toggleFavorite(item) },
                                 onDelete = { viewModel.removeRecent(item.pdf_path) }
                             )
                         }
@@ -478,13 +538,34 @@ fun HomeScreen(
                         }
                     }
 
+                    if (latestPdf != null && !isSearchActive) {
+                        item {
+                            ContinueReadingSection(
+                                item = latestPdf,
+                                todayMs = todayMs,
+                                streakDays = streakDays,
+                                onResume = { onOpenItem(latestPdf) }
+                            )
+                        }
+                    }
+
                     // Header Section
                     item {
                         RecentHeaderRow(
                             isSearchActive = isSearchActive,
                             searchQuery = searchQuery,
-                            recentCount = recentPdfs.size,
+                            recentCount = visibleRecents.size,
                             filteredCount = filteredPdfs.size
+                        )
+                    }
+
+                    // Filter & Sort Row
+                    item {
+                        LibraryFilterSortRow(
+                            currentFilter = appSettings.libraryFilter,
+                            currentSort = appSettings.librarySort,
+                            onSelectFilter = { viewModel.setLibraryFilter(it) },
+                            onSelectSort = { viewModel.setLibrarySort(it) }
                         )
                     }
 
@@ -499,16 +580,28 @@ fun HomeScreen(
                         }
                     } else if (filteredPdfs.isEmpty()) {
                         item {
-                            NoSearchResultsView(searchQuery = searchQuery)
+                            if (searchQuery.isNotBlank()) {
+                                NoSearchResultsView(searchQuery = searchQuery)
+                            } else {
+                                NoFilterResultsView(
+                                    filter = appSettings.libraryFilter,
+                                    onShowAll = { viewModel.setLibraryFilter(LibraryFilter.ALL) }
+                                )
+                            }
                         }
                     } else {
                         items(
                             items = filteredPdfs,
                             key = { it.uriString }
                         ) { item ->
+                            val isFav = remember(item.uriString, appSettings.favoriteKeys) {
+                                PdfDocumentStorage.getDocumentKey(Uri.parse(item.uriString)) in appSettings.favoriteKeys
+                            }
                             RecentPdfCard(
                                 item = item,
+                                isFavorite = isFav,
                                 onClick = { onOpenItem(item) },
+                                onToggleFavorite = { viewModel.toggleFavorite(item) },
                                 onDelete = { viewModel.removeRecent(item.pdf_path) }
                             )
                         }
@@ -568,7 +661,7 @@ fun HomeScreen(
         }
     }
 
-    // Settings Bottom Sheet (Contains View Mode, AMOLED Dark and Themes, Guide, Clear)
+    // Settings Bottom Sheet (Contains View Mode, AMOLED Dark and Themes, Accent Color, Guide, Clear)
     if (showSettingsSheet) {
         HomeSettingsSheet(
             currentSettings = appSettings,
@@ -577,6 +670,9 @@ fun HomeScreen(
             },
             onSelectTheme = { theme ->
                 viewModel.setAppThemeMode(theme)
+            },
+            onSelectAccent = { accent ->
+                viewModel.setAppAccent(accent)
             },
             onOpenSample = {
                 showSettingsSheet = false
@@ -698,19 +794,194 @@ private fun RecentHeaderRow(
     }
 }
 
-/**
- * Large Book Cover Card for GRID VIEW (Book shelf / Cover gallery layout)
- */
 @Composable
-private fun RecentPdfGridCard(
+private fun ContinueReadingSection(
     item: PdfRecentItem,
-    onClick: () -> Unit,
-    onDelete: () -> Unit
+    todayMs: Long,
+    streakDays: Int,
+    onResume: () -> Unit
 ) {
-    val progress = if (item.pageCount > 0) {
-        ((item.lastReadPage + 1).toFloat() / item.pageCount.toFloat()).coerceIn(0f, 1f)
-    } else 0f
+    val total = item.pageCount
+    val currentPage = if (total > 0) (item.lastReadPage + 1).coerceIn(1, total) else (item.lastReadPage + 1).coerceAtLeast(1)
+    val progress = if (total > 0) (currentPage.toFloat() / total.toFloat()).coerceIn(0f, 1f) else 0f
+    val percent = (progress * 100f).roundToInt()
+    val pagesLeft = if (total > 0) (total - currentPage).coerceAtLeast(0) else 0
 
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .shadow(3.dp, RoundedCornerShape(18.dp))
+                .clickable(onClick = onResume)
+                .testTag("continue_reading_card"),
+            shape = RoundedCornerShape(18.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(14.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(width = 68.dp, height = 94.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Color(0xFF222222))
+                        .border(0.5.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(10.dp))
+                ) {
+                    PdfCoverThumbnail(
+                        item = item,
+                        showTitleOnFallback = false,
+                        iconSize = 30.dp
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(14.dp))
+
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "CONTINUE READING",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = item.fileName,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = if (total > 0) {
+                            "Page $currentPage of $total • $percent% • $pagesLeft pages left"
+                        } else {
+                            "Page $currentPage"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    LinearProgressIndicator(
+                        progress = { progress },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(5.dp)
+                            .clip(RoundedCornerShape(3.dp)),
+                        color = MaterialTheme.colorScheme.primary,
+                        trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Button(
+                        onClick = onResume,
+                        shape = RoundedCornerShape(10.dp),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp)
+                    ) {
+                        Text(
+                            text = "Resume",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+            }
+        }
+
+        val todayMinutes = (todayMs / 60_000L).toInt()
+        if (todayMinutes > 0 || streakDays > 0) {
+            Text(
+                text = "Today $todayMinutes min • $streakDays-day streak",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 6.dp, start = 4.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun LibraryFilterSortRow(
+    currentFilter: LibraryFilter,
+    currentSort: LibrarySort,
+    onSelectFilter: (LibraryFilter) -> Unit,
+    onSelectSort: (LibrarySort) -> Unit
+) {
+    var showSortMenu by remember { mutableStateOf(false) }
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        LazyRow(
+            modifier = Modifier.weight(1f),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            items(LibraryFilter.entries) { filter ->
+                FilterChip(
+                    selected = currentFilter == filter,
+                    onClick = { onSelectFilter(filter) },
+                    label = { Text(filter.displayName) },
+                    modifier = Modifier.testTag("library_filter_${filter.name}")
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.width(6.dp))
+
+        Box {
+            IconButton(
+                onClick = { showSortMenu = true },
+                modifier = Modifier.testTag("library_sort_btn")
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.Sort,
+                    contentDescription = "Sort library",
+                    tint = if (currentSort != LibrarySort.RECENT) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    }
+                )
+            }
+            DropdownMenu(
+                expanded = showSortMenu,
+                onDismissRequest = { showSortMenu = false }
+            ) {
+                LibrarySort.entries.forEach { sort ->
+                    DropdownMenuItem(
+                        text = { Text(sort.displayName) },
+                        trailingIcon = if (currentSort == sort) {
+                            {
+                                Icon(
+                                    imageVector = Icons.Default.Check,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        } else null,
+                        onClick = {
+                            showSortMenu = false
+                            onSelectSort(sort)
+                        }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PdfCoverThumbnail(
+    item: PdfRecentItem,
+    showTitleOnFallback: Boolean,
+    iconSize: androidx.compose.ui.unit.Dp,
+    spineWidth: androidx.compose.ui.unit.Dp = 6.dp
+) {
     val thumbnailBitmap = remember(item.thumbnailPath) {
         item.thumbnailPath?.let { path ->
             val file = File(path)
@@ -723,6 +994,93 @@ private fun RecentPdfGridCard(
             } else null
         }
     }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        if (thumbnailBitmap != null) {
+            Image(
+                bitmap = thumbnailBitmap.asImageBitmap(),
+                contentDescription = "Cover of ${item.fileName}",
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop
+            )
+        } else {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.verticalGradient(
+                            colors = listOf(
+                                MaterialTheme.colorScheme.primaryContainer,
+                                MaterialTheme.colorScheme.surfaceVariant
+                            )
+                        )
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                if (showTitleOnFallback) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier.padding(16.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Description,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(iconSize)
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = item.fileName,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                } else {
+                    Icon(
+                        imageVector = Icons.Default.Description,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(iconSize)
+                    )
+                }
+            }
+        }
+
+        // Realistic Book Spine Shadow on left edge
+        Box(
+            modifier = Modifier
+                .fillMaxHeight()
+                .width(spineWidth)
+                .background(
+                    Brush.horizontalGradient(
+                        colors = listOf(
+                            Color(0x55000000),
+                            Color(0x15000000),
+                            Color.Transparent
+                        )
+                    )
+                )
+        )
+    }
+}
+
+/**
+ * Large Book Cover Card for GRID VIEW (Book shelf / Cover gallery layout)
+ */
+@Composable
+private fun RecentPdfGridCard(
+    item: PdfRecentItem,
+    isFavorite: Boolean,
+    onClick: () -> Unit,
+    onToggleFavorite: () -> Unit,
+    onDelete: () -> Unit
+) {
+    val progress = if (item.pageCount > 0) {
+        ((item.lastReadPage + 1).toFloat() / item.pageCount.toFloat()).coerceIn(0f, 1f)
+    } else 0f
 
     Card(
         modifier = Modifier
@@ -742,65 +1100,11 @@ private fun RecentPdfGridCard(
                     .clip(RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp))
                     .background(Color(0xFF202020))
             ) {
-                if (thumbnailBitmap != null) {
-                    Image(
-                        bitmap = thumbnailBitmap.asImageBitmap(),
-                        contentDescription = "Cover of ${item.fileName}",
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.Crop
-                    )
-                } else {
-                    // Stylish Book Cover Fallback with Spine Effect
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(
-                                Brush.verticalGradient(
-                                    colors = listOf(
-                                        MaterialTheme.colorScheme.primaryContainer,
-                                        MaterialTheme.colorScheme.surfaceVariant
-                                    )
-                                )
-                            ),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            modifier = Modifier.padding(16.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Description,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(48.dp)
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(
-                                text = item.fileName,
-                                style = MaterialTheme.typography.bodySmall,
-                                fontWeight = FontWeight.Bold,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                        }
-                    }
-                }
-
-                // Realistic Book Spine Shadow on left edge
-                Box(
-                    modifier = Modifier
-                        .fillMaxHeight()
-                        .width(10.dp)
-                        .background(
-                            Brush.horizontalGradient(
-                                colors = listOf(
-                                    Color(0x55000000),
-                                    Color(0x15000000),
-                                    Color.Transparent
-                                )
-                            )
-                        )
+                PdfCoverThumbnail(
+                    item = item,
+                    showTitleOnFallback = true,
+                    iconSize = 48.dp,
+                    spineWidth = 10.dp
                 )
 
                 // Page count badge overlay at bottom right of cover
@@ -856,7 +1160,7 @@ private fun RecentPdfGridCard(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = formatTimeAgo(item.lastOpenedTimestamp),
                             style = MaterialTheme.typography.labelSmall,
@@ -871,18 +1175,34 @@ private fun RecentPdfGridCard(
                         }
                     }
 
-                    IconButton(
-                        onClick = onDelete,
-                        modifier = Modifier
-                            .size(28.dp)
-                            .testTag("delete_grid_recent_btn_${item.uriString.hashCode()}")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.DeleteOutline,
-                            contentDescription = stringResource(R.string.remove),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(18.dp)
-                        )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(
+                            onClick = onToggleFavorite,
+                            modifier = Modifier
+                                .size(28.dp)
+                                .testTag("favorite_grid_${item.uriString.hashCode()}")
+                        ) {
+                            Icon(
+                                imageVector = if (isFavorite) Icons.Default.Star else Icons.Default.StarBorder,
+                                contentDescription = if (isFavorite) "Remove from favorites" else "Add to favorites",
+                                tint = if (isFavorite) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+
+                        IconButton(
+                            onClick = onDelete,
+                            modifier = Modifier
+                                .size(28.dp)
+                                .testTag("delete_grid_recent_btn_${item.uriString.hashCode()}")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.DeleteOutline,
+                                contentDescription = stringResource(R.string.remove),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
                     }
                 }
             }
@@ -896,25 +1216,14 @@ private fun RecentPdfGridCard(
 @Composable
 private fun RecentPdfCard(
     item: PdfRecentItem,
+    isFavorite: Boolean,
     onClick: () -> Unit,
+    onToggleFavorite: () -> Unit,
     onDelete: () -> Unit
 ) {
     val progress = if (item.pageCount > 0) {
         ((item.lastReadPage + 1).toFloat() / item.pageCount.toFloat()).coerceIn(0f, 1f)
     } else 0f
-
-    val thumbnailBitmap = remember(item.thumbnailPath) {
-        item.thumbnailPath?.let { path ->
-            val file = File(path)
-            if (file.exists()) {
-                try {
-                    BitmapFactory.decodeFile(path)
-                } catch (e: Exception) {
-                    null
-                }
-            } else null
-        }
-    }
 
     Card(
         modifier = Modifier
@@ -939,46 +1248,11 @@ private fun RecentPdfCard(
                     .background(Color(0xFF222222))
                     .border(0.5.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp))
             ) {
-                if (thumbnailBitmap != null) {
-                    Image(
-                        bitmap = thumbnailBitmap.asImageBitmap(),
-                        contentDescription = null,
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.Crop
-                    )
-                } else {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(
-                                Brush.verticalGradient(
-                                    listOf(
-                                        MaterialTheme.colorScheme.primaryContainer,
-                                        MaterialTheme.colorScheme.surfaceVariant
-                                    )
-                                )
-                            ),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Description,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(32.dp)
-                        )
-                    }
-                }
-
-                // Subtle Book Spine Shadow
-                Box(
-                    modifier = Modifier
-                        .fillMaxHeight()
-                        .width(6.dp)
-                        .background(
-                            Brush.horizontalGradient(
-                                listOf(Color(0x44000000), Color.Transparent)
-                            )
-                        )
+                PdfCoverThumbnail(
+                    item = item,
+                    showTitleOnFallback = false,
+                    iconSize = 32.dp,
+                    spineWidth = 6.dp
                 )
 
                 // Page badge at bottom-right of cover
@@ -1056,6 +1330,17 @@ private fun RecentPdfCard(
             }
 
             IconButton(
+                onClick = onToggleFavorite,
+                modifier = Modifier.testTag("favorite_${item.uriString.hashCode()}")
+            ) {
+                Icon(
+                    imageVector = if (isFavorite) Icons.Default.Star else Icons.Default.StarBorder,
+                    contentDescription = if (isFavorite) "Remove from favorites" else "Add to favorites",
+                    tint = if (isFavorite) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            IconButton(
                 onClick = onDelete,
                 modifier = Modifier.testTag("delete_recent_btn_${item.uriString.hashCode()}")
             ) {
@@ -1082,6 +1367,7 @@ private fun HomeSettingsSheet(
     currentSettings: AppSettings,
     onSelectViewMode: (RecentViewMode) -> Unit,
     onSelectTheme: (AppThemeMode) -> Unit,
+    onSelectAccent: (AppAccent) -> Unit,
     onOpenSample: () -> Unit,
     onClearRecents: () -> Unit,
     hasRecents: Boolean,
@@ -1098,6 +1384,7 @@ private fun HomeSettingsSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 36.dp)
         ) {
@@ -1182,7 +1469,7 @@ private fun HomeSettingsSheet(
                 description = "Pure pitch black (#000000) for OLED displays & battery saving",
                 icon = Icons.Default.DarkMode,
                 badgeText = "OLED Black",
-                badgeColor = Color(0xFFFF5252),
+                badgeColor = MaterialTheme.colorScheme.primary,
                 isSelected = currentSettings.appThemeMode == AppThemeMode.AMOLED,
                 onClick = { onSelectTheme(AppThemeMode.AMOLED) }
             )
@@ -1224,7 +1511,25 @@ private fun HomeSettingsSheet(
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Spacer(modifier = Modifier.height(16.dp))
 
-            // ==================== SECTION 3: QUICK TOOLS ====================
+            // ==================== SECTION 3: ACCENT COLOR ====================
+            Text(
+                text = "ACCENT COLOR",
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+
+            AccentColorRow(
+                selectedAccent = currentSettings.appAccent,
+                onSelectAccent = onSelectAccent
+            )
+
+            Spacer(modifier = Modifier.height(24.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // ==================== SECTION 4: QUICK TOOLS ====================
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
@@ -1249,6 +1554,78 @@ private fun HomeSettingsSheet(
                         Spacer(modifier = Modifier.width(8.dp))
                         Text("Clear Recents", fontSize = 13.sp)
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AccentColorRow(
+    selectedAccent: AppAccent,
+    onSelectAccent: (AppAccent) -> Unit
+) {
+    val context = LocalContext.current
+    val isSystemDark = isSystemInDarkTheme()
+    val accents = remember {
+        AppAccent.entries.filter {
+            it != AppAccent.DYNAMIC || Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+        }
+    }
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        accents.forEach { accent ->
+            val isSelected = selectedAccent == accent
+            val swatchColor = when (accent) {
+                AppAccent.SCARLET -> Color(0xFFD32F2F)
+                AppAccent.OCEAN -> Color(0xFF1E88E5)
+                AppAccent.EMERALD -> Color(0xFF2E7D32)
+                AppAccent.VIOLET -> Color(0xFF7B1FA2)
+                AppAccent.AMBER -> Color(0xFFEF6C00)
+                AppAccent.DYNAMIC -> {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        if (isSystemDark) dynamicDarkColorScheme(context).primary else dynamicLightColorScheme(context).primary
+                    } else {
+                        MaterialTheme.colorScheme.primary
+                    }
+                }
+            }
+            val iconTint = if (accent == AppAccent.DYNAMIC && isSystemDark) Color.Black else Color.White
+
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .background(swatchColor)
+                    .then(
+                        if (isSelected) {
+                            Modifier.border(2.5.dp, MaterialTheme.colorScheme.onSurface, CircleShape)
+                        } else {
+                            Modifier.border(1.dp, MaterialTheme.colorScheme.outlineVariant, CircleShape)
+                        }
+                    )
+                    .clickable { onSelectAccent(accent) }
+                    .testTag("accent_${accent.name}"),
+                contentAlignment = Alignment.Center
+            ) {
+                if (isSelected) {
+                    Icon(
+                        imageVector = Icons.Default.Check,
+                        contentDescription = "${accent.displayName} selected",
+                        tint = iconTint,
+                        modifier = Modifier.size(20.dp)
+                    )
+                } else if (accent == AppAccent.DYNAMIC) {
+                    Icon(
+                        imageVector = Icons.Default.AutoAwesome,
+                        contentDescription = accent.displayName,
+                        tint = iconTint,
+                        modifier = Modifier.size(18.dp)
+                    )
                 }
             }
         }
@@ -1386,7 +1763,7 @@ private fun ThemeOptionCard(
                         ) {
                             Text(
                                 text = badgeText,
-                                color = Color.White,
+                                color = MaterialTheme.colorScheme.onPrimary,
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.Bold
                             )
@@ -1433,6 +1810,41 @@ private fun NoSearchResultsView(searchQuery: String) {
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+        }
+    }
+}
+
+@Composable
+private fun NoFilterResultsView(
+    filter: LibraryFilter,
+    onShowAll: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 40.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Icon(
+                imageVector = if (filter == LibraryFilter.FAVORITES) Icons.Default.StarBorder else Icons.Default.Description,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.outline,
+                modifier = Modifier.size(48.dp)
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            Text(
+                text = "No ${filter.displayName.lowercase(Locale.ROOT)} documents",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            FilledTonalButton(
+                onClick = onShowAll,
+                shape = RoundedCornerShape(10.dp)
+            ) {
+                Text("Show All")
+            }
         }
     }
 }

@@ -1,7 +1,9 @@
 package com.example.ui.theme
 
+import android.content.Context
 import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.dynamicDarkColorScheme
@@ -9,7 +11,10 @@ import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.compositeOver
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.platform.LocalContext
+import com.example.data.settings.AppAccent
 import com.example.data.settings.AppThemeMode
 
 private val AmoledDarkColorScheme =
@@ -77,21 +82,90 @@ private val LightColorScheme =
     onSurfaceVariant = LightOnSurfaceVariant,
   )
 
+fun applyAccentToColorScheme(
+  scheme: ColorScheme,
+  accent: AppAccent,
+  isDark: Boolean,
+  isAmoled: Boolean,
+  context: Context,
+): ColorScheme {
+  if (accent == AppAccent.SCARLET) return scheme
+
+  if (accent == AppAccent.DYNAMIC) {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+      val dynamicScheme = if (isDark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+      return if (isAmoled) {
+        dynamicScheme.copy(
+          background = scheme.background,
+          surface = scheme.surface,
+          surfaceContainerLowest = scheme.surfaceContainerLowest,
+          surfaceContainerLow = scheme.surfaceContainerLow,
+          surfaceContainer = scheme.surfaceContainer,
+          surfaceContainerHigh = scheme.surfaceContainerHigh,
+          surfaceContainerHighest = scheme.surfaceContainerHighest,
+        )
+      } else {
+        dynamicScheme
+      }
+    }
+    return scheme
+  }
+
+  val primary = when (accent) {
+    AppAccent.OCEAN -> if (isDark) Color(0xFF64B5F6) else Color(0xFF1E88E5)
+    AppAccent.EMERALD -> if (isDark) Color(0xFF66BB6A) else Color(0xFF2E7D32)
+    AppAccent.VIOLET -> if (isDark) Color(0xFFCE93D8) else Color(0xFF7B1FA2)
+    AppAccent.AMBER -> if (isDark) Color(0xFFFFB74D) else Color(0xFFEF6C00)
+    AppAccent.SCARLET, AppAccent.DYNAMIC -> scheme.primary
+  }
+  val onPrimary = if (isDark) Color.Black else Color.White
+  val primaryContainer = primary.copy(alpha = if (isDark) 0.24f else 0.14f).compositeOver(scheme.surface)
+  val onPrimaryContainer = if (isDark) {
+    lerp(primary, Color.White, 0.72f)
+  } else {
+    lerp(primary, Color.Black, 0.55f)
+  }
+  val secondary = if (isDark) {
+    lerp(primary, Color.White, 0.20f)
+  } else {
+    lerp(primary, Color.Black, 0.20f)
+  }
+  val secondaryContainer = primary.copy(alpha = if (isDark) 0.16f else 0.10f).compositeOver(scheme.surface)
+
+  return scheme.copy(
+    primary = primary,
+    onPrimary = onPrimary,
+    primaryContainer = primaryContainer,
+    onPrimaryContainer = onPrimaryContainer,
+    secondary = secondary,
+    onSecondary = onPrimary,
+    secondaryContainer = secondaryContainer,
+    onSecondaryContainer = onPrimaryContainer,
+  )
+}
+
 @Composable
 fun MyApplicationTheme(
   appThemeMode: AppThemeMode = AppThemeMode.SYSTEM,
+  appAccent: AppAccent = AppAccent.SCARLET,
   dynamicColor: Boolean = false,
   content: @Composable () -> Unit,
 ) {
+  val context = LocalContext.current
   val isSystemDark = isSystemInDarkTheme()
-  val colorScheme =
+  val isAmoled = appThemeMode == AppThemeMode.AMOLED
+  val isDark = when (appThemeMode) {
+    AppThemeMode.AMOLED, AppThemeMode.DARK -> true
+    AppThemeMode.LIGHT -> false
+    AppThemeMode.SYSTEM -> isSystemDark
+  }
+  val baseScheme =
     when (appThemeMode) {
       AppThemeMode.AMOLED -> AmoledDarkColorScheme
       AppThemeMode.DARK -> DarkColorScheme
       AppThemeMode.LIGHT -> LightColorScheme
       AppThemeMode.SYSTEM -> {
         if (dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-          val context = LocalContext.current
           if (isSystemDark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
         } else if (isSystemDark) {
           DarkColorScheme
@@ -100,6 +174,13 @@ fun MyApplicationTheme(
         }
       }
     }
+  val colorScheme = applyAccentToColorScheme(
+    scheme = baseScheme,
+    accent = appAccent,
+    isDark = isDark,
+    isAmoled = isAmoled,
+    context = context,
+  )
 
   MaterialTheme(colorScheme = colorScheme, typography = Typography, content = content)
 }

@@ -19,21 +19,25 @@ import com.example.data.repository.PdfRepository
 import com.example.data.settings.AppSettings
 import com.example.data.settings.DoubleTapZoomMode
 import com.example.data.settings.KeepAwakeOption
+import com.example.data.settings.MarginTrim
 import com.example.data.settings.PageColorTone
 import com.example.data.settings.PageSpacing
 import com.example.data.settings.PrefetchMode
 import com.example.data.settings.ReaderOrientation
+import com.example.data.settings.ReadingStats
 import com.example.data.settings.RenderSharpness
 import com.example.data.settings.SettingsRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 data class PdfReaderUiState(
@@ -52,6 +56,8 @@ data class PdfReaderUiState(
     val showSettingsSheet: Boolean = false,
     val showBookmarksSheet: Boolean = false,
     val showIndexSheet: Boolean = false,
+    val showPageOverview: Boolean = false,
+    val isAutoScrolling: Boolean = false,
     val isScreenWakeActive: Boolean = true,
     val currentOrientation: ReaderOrientation = ReaderOrientation.PORTRAIT,
     val cacheUsageBytes: Int = 0,
@@ -83,12 +89,21 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
     private val _uiState = MutableStateFlow(PdfReaderUiState())
     val uiState: StateFlow<PdfReaderUiState> = _uiState.asStateFlow()
 
+    val navCommands = MutableSharedFlow<Int>(extraBufferCapacity = 8)
+
     var engine: PdfRendererEngine? = null
         private set
 
     private var keepAwakeJob: Job? = null
     private var bookmarksJob: Job? = null
     private var outlineJob: Job? = null
+    private var readingTickerJob: Job? = null
+
+    @Volatile
+    private var isReaderForeground: Boolean = true
+
+    @Volatile
+    private var lastUserActivityMs: Long = System.currentTimeMillis()
 
     init {
         viewModelScope.launch {
@@ -173,6 +188,8 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
                     zoomScale = 1.0f,
                     panOffsetX = 0f,
                     panOffsetY = 0f,
+                    isAutoScrolling = false,
+                    showPageOverview = false,
                     isScreenWakeActive = initialWake,
                     cacheUsageBytes = newEngine.getCacheUsageBytes(),
                     maxCacheBytes = newEngine.getMaxCacheBytes()
@@ -236,6 +253,20 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
                 readingMode = initialMode,
                 thumbnailBitmap = thumb
             )
+
+            // Start 10-second reading time tracker (off main thread)
+            lastUserActivityMs = System.currentTimeMillis()
+            val docKey = PdfDocumentStorage.getDocumentKey(uri)
+            readingTickerJob?.cancel()
+            readingTickerJob = viewModelScope.launch(Dispatchers.IO) {
+                while (isActive) {
+                    delay(10_000L)
+                    val idleMs = System.currentTimeMillis() - lastUserActivityMs
+                    if (isReaderForeground && idleMs < 3 * 60 * 1000L) {
+                        ReadingStats.addTime(getApplication(), docKey, 10_000L)
+                    }
+                }
+            }
         }
     }
 
@@ -300,6 +331,7 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
             val nextMode = if (it.readingMode == ReadingMode.VERTICAL) ReadingMode.HORIZONTAL else ReadingMode.VERTICAL
             it.copy(
                 readingMode = nextMode,
+                isAutoScrolling = if (nextMode == ReadingMode.HORIZONTAL) false else it.isAutoScrolling,
                 zoomScale = 1.0f,
                 panOffsetX = 0f,
                 panOffsetY = 0f
@@ -313,6 +345,7 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
         _uiState.update {
             it.copy(
                 readingMode = mode,
+                isAutoScrolling = if (mode == ReadingMode.HORIZONTAL) false else it.isAutoScrolling,
                 zoomScale = 1.0f,
                 panOffsetX = 0f,
                 panOffsetY = 0f
@@ -320,6 +353,22 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
         }
         saveReadingProgress(_uiState.value.currentPage)
         recordUserActivity()
+    }
+
+    fun stepPage(delta: Int) {
+        navCommands.tryEmit(delta)
+        recordUserActivity()
+    }
+
+    fun setAutoScrolling(active: Boolean) {
+        _uiState.update { state ->
+            state.copy(isAutoScrolling = active && state.readingMode == ReadingMode.VERTICAL)
+        }
+        recordUserActivity()
+    }
+
+    fun toggleAutoScrolling() {
+        setAutoScrolling(!_uiState.value.isAutoScrolling)
     }
 
     /**
@@ -348,10 +397,23 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
     fun toggleBookmarkPage(pageIndex: Int) {
         val doc = _uiState.value.documentInfo ?: return
         val pageNum = pageIndex + 1
+        val chapterTitle = if (pageIndex == _uiState.value.currentPage) {
+            _uiState.value.currentChapterTitle?.takeIf { it.isNotBlank() }
+        } else {
+            OutlineHelper.getCurrentChapter(pageIndex, _uiState.value.outlineItems)?.title?.takeIf { it.isNotBlank() }
+        }
         viewModelScope.launch {
-            val added = repository.toggleBookmark(doc.uri.toString(), pageIndex)
+            val added = repository.toggleBookmark(doc.uri.toString(), pageIndex, title = chapterTitle)
             val msg = if (added) "Page $pageNum bookmarked" else "Bookmark removed (Page $pageNum)"
             _uiState.update { it.copy(hudFeedbackMessage = msg) }
+        }
+        recordUserActivity()
+    }
+
+    fun renameBookmark(bookmark: PdfBookmarkEntity, newTitle: String) {
+        val resolvedTitle = newTitle.trim().ifBlank { "Page ${bookmark.pageNumber}" }
+        viewModelScope.launch {
+            repository.updateBookmarkTitle(bookmark.id, resolvedTitle)
         }
         recordUserActivity()
     }
@@ -365,12 +427,32 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun showBookmarksSheet(show: Boolean) {
-        _uiState.update { it.copy(showBookmarksSheet = show) }
+        _uiState.update {
+            it.copy(
+                showBookmarksSheet = show,
+                isAutoScrolling = if (show) false else it.isAutoScrolling
+            )
+        }
         recordUserActivity()
     }
 
     fun showIndexSheet(show: Boolean) {
-        _uiState.update { it.copy(showIndexSheet = show) }
+        _uiState.update {
+            it.copy(
+                showIndexSheet = show,
+                isAutoScrolling = if (show) false else it.isAutoScrolling
+            )
+        }
+        recordUserActivity()
+    }
+
+    fun showPageOverview(show: Boolean) {
+        _uiState.update {
+            it.copy(
+                showPageOverview = show,
+                isAutoScrolling = if (show) false else it.isAutoScrolling
+            )
+        }
         recordUserActivity()
     }
 
@@ -503,12 +585,22 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun showJumpDialog(show: Boolean) {
-        _uiState.update { it.copy(showJumpDialog = show) }
+        _uiState.update {
+            it.copy(
+                showJumpDialog = show,
+                isAutoScrolling = if (show) false else it.isAutoScrolling
+            )
+        }
         recordUserActivity()
     }
 
     fun showInfoDialog(show: Boolean) {
-        _uiState.update { it.copy(showInfoDialog = show) }
+        _uiState.update {
+            it.copy(
+                showInfoDialog = show,
+                isAutoScrolling = if (show) false else it.isAutoScrolling
+            )
+        }
         recordUserActivity()
     }
 
@@ -516,6 +608,7 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
         _uiState.update {
             it.copy(
                 showSettingsSheet = show,
+                isAutoScrolling = if (show) false else it.isAutoScrolling,
                 cacheUsageBytes = engine?.getCacheUsageBytes() ?: 0,
                 maxCacheBytes = engine?.getMaxCacheBytes() ?: 0
             )
@@ -559,6 +652,27 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
         triggerPrefetch(_uiState.value.currentPage)
     }
 
+    fun updateMarginTrim(trim: MarginTrim) {
+        settingsRepository.updateMarginTrim(trim)
+    }
+
+    fun updateWarmFilterPercent(percent: Int) {
+        settingsRepository.updateWarmFilterPercent(percent)
+    }
+
+    fun updateTapZoneNavigation(enabled: Boolean) {
+        settingsRepository.updateTapZoneNavigation(enabled)
+    }
+
+    fun updateVolumeKeyNavigation(enabled: Boolean) {
+        settingsRepository.updateVolumeKeyNavigation(enabled)
+    }
+
+    fun updateAutoScrollSpeed(speed: Int) {
+        settingsRepository.updateAutoScrollSpeed(speed)
+        recordUserActivity()
+    }
+
     fun clearCache() {
         engine?.clearCache()
         viewModelScope.launch(Dispatchers.IO) {
@@ -571,7 +685,15 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    fun setForeground(foreground: Boolean) {
+        isReaderForeground = foreground
+        if (foreground) {
+            lastUserActivityMs = System.currentTimeMillis()
+        }
+    }
+
     fun recordUserActivity() {
+        lastUserActivityMs = System.currentTimeMillis()
         val option = appSettings.value.keepAwakeOption
         if (option == KeepAwakeOption.ALWAYS_ON || (option != KeepAwakeOption.OFF && option != KeepAwakeOption.SYSTEM_DEFAULT && option.durationMs > 0L)) {
             _uiState.update { it.copy(isScreenWakeActive = true) }
@@ -631,6 +753,9 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
      * Requirement 5: Called when user closes a PDF.
      */
     fun recordClose() {
+        readingTickerJob?.cancel()
+        readingTickerJob = null
+        _uiState.update { it.copy(isAutoScrolling = false) }
         try {
             val doc = _uiState.value.documentInfo ?: return
             repository.recordDocumentResumed(
@@ -647,6 +772,7 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
     override fun onCleared() {
         recordClose()
         super.onCleared()
+        readingTickerJob?.cancel()
         outlineJob?.cancel()
         bookmarksJob?.cancel()
         keepAwakeJob?.cancel()

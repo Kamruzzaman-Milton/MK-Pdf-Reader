@@ -7,11 +7,6 @@ import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.pdf.PdfDocument
 import android.net.Uri
-import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
-import com.tom_roush.pdfbox.pdmodel.PDDocument
-import com.tom_roush.pdfbox.pdmodel.interactive.documentnavigation.destination.PDPageFitWidthDestination
-import com.tom_roush.pdfbox.pdmodel.interactive.documentnavigation.outline.PDDocumentOutline
-import com.tom_roush.pdfbox.pdmodel.interactive.documentnavigation.outline.PDOutlineItem
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -395,44 +390,12 @@ object SamplePdfGenerator {
         }
 
         // Write to file
-        FileOutputStream(sampleFile).use { out ->
-            document.writeTo(out)
-        }
-        document.close()
-
-        // Attach rich PDF bookmarks/outlines using PDFBox
         try {
-            PDFBoxResourceLoader.init(context.applicationContext)
-            val pdDoc = PDDocument.load(sampleFile)
-            val outline = PDDocumentOutline()
-            pdDoc.documentCatalog.documentOutline = outline
-
-            val chapters = listOf(
-                Pair("Welcome & Overview", 0),
-                Pair("Chapter 1: Multi-Directional Viewing Modes", 1),
-                Pair("Chapter 2: Intelligent Zoom & Pan Controls", 2),
-                Pair("Chapter 3: Instant Page Jumper & Navigation", 3),
-                Pair("Chapter 4: Document Metadata & Insights", 4),
-                Pair("Chapter 5: Local Database & History Tracking", 5),
-                Pair("Chapter 6: High Performance Caching", 6),
-                Pair("Chapter 7: About MK PDF Reader", 7)
-            )
-
-            for ((title, pageIndex) in chapters) {
-                if (pageIndex < pdDoc.numberOfPages) {
-                    val item = PDOutlineItem()
-                    item.title = title
-                    val dest = PDPageFitWidthDestination()
-                    dest.page = pdDoc.getPage(pageIndex)
-                    item.destination = dest
-                    outline.addLast(item)
-                }
+            FileOutputStream(sampleFile).use { out ->
+                document.writeTo(out)
             }
-
-            pdDoc.save(sampleFile)
-            pdDoc.close()
-        } catch (e: Exception) {
-            e.printStackTrace()
+        } finally {
+            document.close()
         }
 
         Uri.fromFile(sampleFile)

@@ -25,6 +25,7 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CleaningServices
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ColorLens
+import androidx.compose.material.icons.filled.Crop
 import androidx.compose.material.icons.filled.HighQuality
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Nightlight
@@ -50,6 +51,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.SheetState
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -74,12 +77,14 @@ import com.example.R
 import com.example.data.settings.AppSettings
 import com.example.data.settings.DoubleTapZoomMode
 import com.example.data.settings.KeepAwakeOption
+import com.example.data.settings.MarginTrim
 import com.example.data.settings.PageColorTone
 import com.example.data.settings.PageSpacing
 import com.example.data.settings.PrefetchMode
 import com.example.data.settings.ReaderOrientation
 import com.example.data.settings.RenderSharpness
 import java.util.Locale
+import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -98,6 +103,11 @@ fun SettingsSheet(
     onUpdateHighQualityPrintMode: (Boolean) -> Unit,
     onUpdateDoubleTapZoomMode: (DoubleTapZoomMode) -> Unit = {},
     onClearCache: () -> Unit,
+    onUpdateMarginTrim: (MarginTrim) -> Unit = {},
+    onUpdateWarmFilterPercent: (Int) -> Unit = {},
+    onUpdateTapZoneNavigation: (Boolean) -> Unit = {},
+    onUpdateVolumeKeyNavigation: (Boolean) -> Unit = {},
+    onUpdateAutoScrollSpeed: (Int) -> Unit = {},
     sheetState: SheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 ) {
     var cacheClearedMessage by remember { mutableStateOf(false) }
@@ -619,6 +629,190 @@ fun SettingsSheet(
                             fontWeight = FontWeight.Bold
                         )
                     }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(20.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // 7. Reading Comfort Section
+            SectionHeader(
+                icon = Icons.Default.Crop,
+                title = "Reading Comfort",
+                subtitle = "Margin trimming, warm filter, shortcuts and auto-scroll"
+            )
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Text(
+                text = "Margin Trimming",
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                MarginTrim.entries.forEach { trim ->
+                    FilterChip(
+                        selected = settings.marginTrim == trim,
+                        onClick = { onUpdateMarginTrim(trim) },
+                        label = { Text(trim.displayName, fontSize = 11.sp) },
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("margin_trim_${trim.name.lowercase()}")
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Warm Eye-Care Filter",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = if (settings.warmFilterPercent == 0) "Off" else "${settings.warmFilterPercent}%",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    Slider(
+                        value = settings.warmFilterPercent.toFloat(),
+                        onValueChange = { onUpdateWarmFilterPercent(it.roundToInt()) },
+                        valueRange = 0f..60f,
+                        colors = SliderDefaults.colors(
+                            thumbColor = MaterialTheme.colorScheme.primary,
+                            activeTrackColor = MaterialTheme.colorScheme.primary
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("warm_filter_slider")
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
+                    .padding(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Tap-Zone Navigation",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = "Tap left/right 25% edges to turn pages",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = settings.tapZoneNavigation,
+                    onCheckedChange = onUpdateTapZoneNavigation,
+                    modifier = Modifier.testTag("switch_tap_zone_nav")
+                )
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
+                    .padding(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Volume Key Navigation",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = "Use volume buttons to turn pages while reading",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = settings.volumeKeyNavigation,
+                    onCheckedChange = onUpdateVolumeKeyNavigation,
+                    modifier = Modifier.testTag("switch_volume_key_nav")
+                )
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Auto-Scroll Speed",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = "${settings.autoScrollSpeed}x",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    Slider(
+                        value = settings.autoScrollSpeed.toFloat(),
+                        onValueChange = { onUpdateAutoScrollSpeed(it.roundToInt()) },
+                        valueRange = 1f..10f,
+                        steps = 8,
+                        colors = SliderDefaults.colors(
+                            thumbColor = MaterialTheme.colorScheme.primary,
+                            activeTrackColor = MaterialTheme.colorScheme.primary
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("auto_scroll_speed_slider")
+                    )
                 }
             }
 

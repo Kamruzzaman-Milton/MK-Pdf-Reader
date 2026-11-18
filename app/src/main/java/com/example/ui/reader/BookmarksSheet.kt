@@ -28,7 +28,10 @@ import androidx.compose.material.icons.filled.BookmarkBorder
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.MenuBook
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -38,12 +41,17 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SheetState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -68,11 +76,14 @@ fun BookmarksSheet(
     onDismiss: () -> Unit,
     onJumpToPage: (Int) -> Unit,
     onDeleteBookmark: (PdfBookmarkEntity) -> Unit,
+    onRenameBookmark: (PdfBookmarkEntity, String) -> Unit = { _, _ -> },
     onToggleCurrentPageBookmark: () -> Unit,
     isCurrentPageBookmarked: Boolean,
     sheetState: SheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 ) {
     val dateFormat = SimpleDateFormat("MMM d, yyyy • h:mm a", Locale.getDefault())
+    var editingBookmark by remember { mutableStateOf<PdfBookmarkEntity?>(null) }
+    var editTitleText by remember { mutableStateOf("") }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -311,18 +322,37 @@ fun BookmarksSheet(
                                     }
                                 }
 
-                                IconButton(
-                                    onClick = { onDeleteBookmark(bookmark) },
-                                    modifier = Modifier
-                                        .size(36.dp)
-                                        .testTag("delete_bookmark_${bookmark.pageIndex}")
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.DeleteOutline,
-                                        contentDescription = "Delete bookmark",
-                                        tint = MaterialTheme.colorScheme.error,
-                                        modifier = Modifier.size(20.dp)
-                                    )
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    IconButton(
+                                        onClick = {
+                                            editingBookmark = bookmark
+                                            editTitleText = bookmark.title ?: "Page ${bookmark.pageNumber}"
+                                        },
+                                        modifier = Modifier
+                                            .size(36.dp)
+                                            .testTag("edit_bookmark_${bookmark.pageIndex}")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Edit,
+                                            contentDescription = "Edit bookmark title",
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+
+                                    IconButton(
+                                        onClick = { onDeleteBookmark(bookmark) },
+                                        modifier = Modifier
+                                            .size(36.dp)
+                                            .testTag("delete_bookmark_${bookmark.pageIndex}")
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.DeleteOutline,
+                                            contentDescription = "Delete bookmark",
+                                            tint = MaterialTheme.colorScheme.error,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -330,5 +360,38 @@ fun BookmarksSheet(
                 }
             }
         }
+    }
+
+    editingBookmark?.let { target ->
+        AlertDialog(
+            onDismissRequest = { editingBookmark = null },
+            title = { Text("Rename Bookmark", fontWeight = FontWeight.Bold) },
+            text = {
+                OutlinedTextField(
+                    value = editTitleText,
+                    onValueChange = { editTitleText = it },
+                    singleLine = true,
+                    label = { Text("Bookmark title") },
+                    placeholder = { Text("Page ${target.pageNumber}") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val finalTitle = editTitleText.trim().ifBlank { "Page ${target.pageNumber}" }
+                        onRenameBookmark(target, finalTitle)
+                        editingBookmark = null
+                    }
+                ) {
+                    Text("Save")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { editingBookmark = null }) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 }

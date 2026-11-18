@@ -67,6 +67,39 @@ enum class DoubleTapZoomMode(val zoomScale: Float, val displayName: String, val 
     MAX_2_6X(2.60f, "2.60x Ultra Close", "High magnification for fine figures and diagrams")
 }
 
+enum class MarginTrim(val horizontalFraction: Float, val displayName: String) {
+    OFF(0f, "Off"),
+    LIGHT(0.04f, "Light"),
+    MEDIUM(0.08f, "Medium"),
+    STRONG(0.12f, "Strong");
+
+    val verticalFraction: Float
+        get() = horizontalFraction / 2f
+}
+
+enum class AppAccent(val displayName: String) {
+    SCARLET("Scarlet"),
+    OCEAN("Ocean"),
+    EMERALD("Emerald"),
+    VIOLET("Violet"),
+    AMBER("Amber"),
+    DYNAMIC("Dynamic")
+}
+
+enum class LibrarySort(val displayName: String) {
+    RECENT("Recent"),
+    NAME("Name"),
+    SIZE("Size"),
+    PROGRESS("Progress")
+}
+
+enum class LibraryFilter(val displayName: String) {
+    ALL("All"),
+    IN_PROGRESS("In Progress"),
+    FINISHED("Finished"),
+    FAVORITES("Favorites")
+}
+
 data class AppSettings(
     val sharpness: RenderSharpness = RenderSharpness.HIGH_CLARITY,
     val prefetchMode: PrefetchMode = PrefetchMode.AGGRESSIVE,
@@ -79,7 +112,16 @@ data class AppSettings(
     val doubleTapZoomLevel: Float = 2.08f,
     val highQualityPrintMode: Boolean = true,
     val appThemeMode: AppThemeMode = AppThemeMode.SYSTEM,
-    val recentViewMode: RecentViewMode = RecentViewMode.GRID
+    val recentViewMode: RecentViewMode = RecentViewMode.GRID,
+    val marginTrim: MarginTrim = MarginTrim.OFF,
+    val warmFilterPercent: Int = 0,
+    val tapZoneNavigation: Boolean = false,
+    val volumeKeyNavigation: Boolean = false,
+    val autoScrollSpeed: Int = 3,
+    val appAccent: AppAccent = AppAccent.SCARLET,
+    val librarySort: LibrarySort = LibrarySort.RECENT,
+    val libraryFilter: LibraryFilter = LibraryFilter.ALL,
+    val favoriteKeys: Set<String> = emptySet()
 )
 
 class SettingsRepository(context: Context) {
@@ -101,6 +143,15 @@ class SettingsRepository(context: Context) {
         val printMode = prefs.getBoolean(KEY_PRINT_MODE, true)
         val themeName = prefs.getString(KEY_THEME_MODE, AppThemeMode.SYSTEM.name)
         val viewModeName = prefs.getString(KEY_VIEW_MODE, RecentViewMode.GRID.name)
+        val marginTrimName = prefs.getString(KEY_MARGIN_TRIM, MarginTrim.OFF.name)
+        val warmFilterPercent = prefs.getInt(KEY_WARM_FILTER_PERCENT, 0).coerceIn(0, 60)
+        val tapZoneNav = prefs.getBoolean(KEY_TAP_ZONE_NAV, false)
+        val volumeKeyNav = prefs.getBoolean(KEY_VOLUME_KEY_NAV, false)
+        val autoScrollSpeed = prefs.getInt(KEY_AUTO_SCROLL_SPEED, 3).coerceIn(1, 10)
+        val accentName = prefs.getString(KEY_APP_ACCENT, AppAccent.SCARLET.name)
+        val librarySortName = prefs.getString(KEY_LIBRARY_SORT, LibrarySort.RECENT.name)
+        val libraryFilterName = prefs.getString(KEY_LIBRARY_FILTER, LibraryFilter.ALL.name)
+        val favoriteKeys = prefs.getStringSet(KEY_FAVORITE_KEYS, emptySet())?.toSet() ?: emptySet()
 
         return AppSettings(
             sharpness = parseEnum(sharpnessName, RenderSharpness.HIGH_CLARITY),
@@ -114,7 +165,16 @@ class SettingsRepository(context: Context) {
             doubleTapZoomLevel = zoomLevel,
             highQualityPrintMode = printMode,
             appThemeMode = parseEnum(themeName, AppThemeMode.SYSTEM),
-            recentViewMode = parseEnum(viewModeName, RecentViewMode.GRID)
+            recentViewMode = parseEnum(viewModeName, RecentViewMode.GRID),
+            marginTrim = parseEnum(marginTrimName, MarginTrim.OFF),
+            warmFilterPercent = warmFilterPercent,
+            tapZoneNavigation = tapZoneNav,
+            volumeKeyNavigation = volumeKeyNav,
+            autoScrollSpeed = autoScrollSpeed,
+            appAccent = parseEnum(accentName, AppAccent.SCARLET),
+            librarySort = parseEnum(librarySortName, LibrarySort.RECENT),
+            libraryFilter = parseEnum(libraryFilterName, LibraryFilter.ALL),
+            favoriteKeys = favoriteKeys
         )
     }
 
@@ -178,6 +238,58 @@ class SettingsRepository(context: Context) {
         _settings.value = _settings.value.copy(highQualityPrintMode = enabled)
     }
 
+    fun updateMarginTrim(trim: MarginTrim) {
+        prefs.edit().putString(KEY_MARGIN_TRIM, trim.name).apply()
+        _settings.value = _settings.value.copy(marginTrim = trim)
+    }
+
+    fun updateWarmFilterPercent(percent: Int) {
+        val clamped = percent.coerceIn(0, 60)
+        prefs.edit().putInt(KEY_WARM_FILTER_PERCENT, clamped).apply()
+        _settings.value = _settings.value.copy(warmFilterPercent = clamped)
+    }
+
+    fun updateTapZoneNavigation(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_TAP_ZONE_NAV, enabled).apply()
+        _settings.value = _settings.value.copy(tapZoneNavigation = enabled)
+    }
+
+    fun updateVolumeKeyNavigation(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_VOLUME_KEY_NAV, enabled).apply()
+        _settings.value = _settings.value.copy(volumeKeyNavigation = enabled)
+    }
+
+    fun updateAutoScrollSpeed(speed: Int) {
+        val clamped = speed.coerceIn(1, 10)
+        prefs.edit().putInt(KEY_AUTO_SCROLL_SPEED, clamped).apply()
+        _settings.value = _settings.value.copy(autoScrollSpeed = clamped)
+    }
+
+    fun updateAppAccent(accent: AppAccent) {
+        prefs.edit().putString(KEY_APP_ACCENT, accent.name).apply()
+        _settings.value = _settings.value.copy(appAccent = accent)
+    }
+
+    fun updateLibrarySort(sort: LibrarySort) {
+        prefs.edit().putString(KEY_LIBRARY_SORT, sort.name).apply()
+        _settings.value = _settings.value.copy(librarySort = sort)
+    }
+
+    fun updateLibraryFilter(filter: LibraryFilter) {
+        prefs.edit().putString(KEY_LIBRARY_FILTER, filter.name).apply()
+        _settings.value = _settings.value.copy(libraryFilter = filter)
+    }
+
+    fun toggleFavoriteKey(docKey: String) {
+        val updated = HashSet(_settings.value.favoriteKeys)
+        if (!updated.add(docKey)) {
+            updated.remove(docKey)
+        }
+        val immutableCopy = updated.toSet()
+        prefs.edit().putStringSet(KEY_FAVORITE_KEYS, HashSet(immutableCopy)).apply()
+        _settings.value = _settings.value.copy(favoriteKeys = immutableCopy)
+    }
+
     private inline fun <reified T : Enum<T>> parseEnum(name: String?, default: T): T {
         if (name == null) return default
         return try {
@@ -200,6 +312,15 @@ class SettingsRepository(context: Context) {
         private const val KEY_PRINT_MODE = "high_quality_print_mode"
         private const val KEY_THEME_MODE = "app_theme_mode"
         private const val KEY_VIEW_MODE = "recent_view_mode"
+        private const val KEY_MARGIN_TRIM = "margin_trim"
+        private const val KEY_WARM_FILTER_PERCENT = "warm_filter_percent"
+        private const val KEY_TAP_ZONE_NAV = "tap_zone_navigation"
+        private const val KEY_VOLUME_KEY_NAV = "volume_key_navigation"
+        private const val KEY_AUTO_SCROLL_SPEED = "auto_scroll_speed"
+        private const val KEY_APP_ACCENT = "app_accent"
+        private const val KEY_LIBRARY_SORT = "library_sort"
+        private const val KEY_LIBRARY_FILTER = "library_filter"
+        private const val KEY_FAVORITE_KEYS = "favorite_keys"
 
         @Volatile
         private var instance: SettingsRepository? = null
