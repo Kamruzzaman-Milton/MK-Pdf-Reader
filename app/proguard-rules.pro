@@ -1,3 +1,5 @@
+-keep class com.shockwave.** { *; }
+-keepclassmembers class com.shockwave.** { *; }
 -keep class com.shockwave.pdfium.** { *; }
 -dontwarn com.shockwave.pdfium.**
 -keepclasseswithmembernames class * { native <methods>; }

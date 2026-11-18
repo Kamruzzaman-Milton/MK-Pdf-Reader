@@ -1,9 +1,5 @@
 package com.example.ui.reader
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -44,6 +40,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
@@ -54,6 +51,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -65,6 +63,7 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
@@ -74,133 +73,142 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.example.data.pdf.OutlineIndex
 import com.example.data.pdf.PdfOutlineItem
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.withContext
+import java.util.Locale
 
-data class FlatOutlineEntry(
-    val item: PdfOutlineItem,
-    val level: Int,
-    val hasChildren: Boolean,
-    val isExpanded: Boolean
+private const val MAX_SEARCH_RESULTS = 300
+
+private data class DebouncedSearchState(
+    val query: String = "",
+    val indices: List<Int> = emptyList()
 )
 
-data class SearchResultEntry(
-    val item: PdfOutlineItem,
-    val parentBreadcrumb: String?,
-    val level: Int
-)
-
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, FlowPreview::class)
 @Composable
 fun IndexSheet(
-    outlineItems: List<PdfOutlineItem>,
+    outlineIndex: OutlineIndex?,
     isLoading: Boolean = false,
     currentPageIndex: Int,
     documentTitle: String = "Document Index",
+    diagnosticText: String = "",
     expandedStates: Map<String, Boolean>,
     initialScrollIndex: Int,
     initialScrollOffset: Int,
     onToggleExpand: (String) -> Unit,
     onSetAllExpanded: (List<String>, Boolean) -> Unit,
     onSaveScrollPosition: (Int, Int) -> Unit,
+    onRetryIndexing: () -> Unit = {},
     onDismiss: () -> Unit,
     onJumpToPage: (Int) -> Unit
 ) {
     var searchQuery by rememberSaveable { mutableStateOf("") }
     val focusManager = LocalFocusManager.current
 
-    // Collect all expandable IDs
-    val expandableIds = remember(outlineItems) {
-        val list = mutableListOf<String>()
-        fun collect(items: List<PdfOutlineItem>) {
-            for (item in items) {
-                if (item.children.isNotEmpty()) {
-                    list.add(item.id)
-                    collect(item.children)
-                }
-            }
+    val flat = outlineIndex?.flat ?: emptyList()
+    val totalNodesCount = flat.size
+    val expandableIds = outlineIndex?.expandableIds ?: emptyList()
+
+    // Debounced search on Dispatchers.Default over precomputed lowerTitles and page forms, capped at 300 results
+    val searchState by produceState(
+        initialValue = DebouncedSearchState(),
+        key1 = outlineIndex
+    ) {
+        val idx = outlineIndex
+        if (idx == null || idx.flat.isEmpty()) {
+            value = DebouncedSearchState()
+            return@produceState
         }
-        collect(outlineItems)
-        list
-    }
-
-    // Count total chapters & sub-chapters
-    val totalNodesCount = remember(outlineItems) {
-        fun countTotal(items: List<PdfOutlineItem>): Int {
-            var count = items.size
-            for (item in items) {
-                count += countTotal(item.children)
-            }
-            return count
-        }
-        countTotal(outlineItems)
-    }
-
-    // Search results across the entire outline hierarchy
-    val searchResults = remember(outlineItems, searchQuery) {
-        if (searchQuery.isBlank()) {
-            emptyList()
-        } else {
-            val query = searchQuery.trim()
-            val list = mutableListOf<SearchResultEntry>()
-            fun searchIn(items: List<PdfOutlineItem>, parentTitles: List<String>, level: Int) {
-                for (item in items) {
-                    val currentBreadcrumb = if (parentTitles.isNotEmpty()) parentTitles.joinToString(" › ") else null
-                    val matchesTitle = item.title.contains(query, ignoreCase = true)
-                    val pageNumStr = (item.pageIndex + 1).toString()
-                    val matchesPage = pageNumStr == query || "p. $pageNumStr".contains(query, ignoreCase = true) || "page $pageNumStr".contains(query, ignoreCase = true)
-
-                    if (matchesTitle || matchesPage) {
-                        list.add(SearchResultEntry(item, currentBreadcrumb, level))
+        snapshotFlow { searchQuery }
+            .debounce(150L)
+            .distinctUntilChanged()
+            .collectLatest { raw ->
+                val trimmed = raw.trim()
+                if (trimmed.isEmpty()) {
+                    value = DebouncedSearchState(query = "", indices = emptyList())
+                } else {
+                    val matched = withContext(Dispatchers.Default) {
+                        val lowerQuery = trimmed.lowercase(Locale.ROOT)
+                        val checkPage = lowerQuery[0].isDigit() || lowerQuery.startsWith("p")
+                        val items = idx.flat
+                        val lowerTitles = idx.lowerTitles
+                        val n = items.size
+                        val out = ArrayList<Int>(64)
+                        for (i in 0 until n) {
+                            val titleHit = lowerTitles[i].contains(lowerQuery)
+                            val pageHit = if (!titleHit && checkPage) {
+                                val pageStr = (items[i].pageIndex + 1).toString()
+                                pageStr == lowerQuery ||
+                                    "p. $pageStr".contains(lowerQuery) ||
+                                    "page $pageStr".contains(lowerQuery)
+                            } else {
+                                false
+                            }
+                            if (titleHit || pageHit) {
+                                out.add(i)
+                                if (out.size >= MAX_SEARCH_RESULTS) break
+                            }
+                        }
+                        out
                     }
-                    if (item.children.isNotEmpty()) {
-                        searchIn(item.children, parentTitles + item.title, level + 1)
-                    }
+                    value = DebouncedSearchState(query = trimmed, indices = matched)
                 }
             }
-            searchIn(outlineItems, emptyList(), 0)
-            list
-        }
     }
 
-    // Flatten visible items based on expansion state for standard tree view
-    val flatItems = remember(outlineItems, expandedStates) {
-        fun flatten(items: List<PdfOutlineItem>, level: Int = 0): List<FlatOutlineEntry> {
-            val list = mutableListOf<FlatOutlineEntry>()
-            for (item in items) {
-                val hasChildren = item.children.isNotEmpty()
-                val isExpanded = expandedStates[item.id] ?: true
-                list.add(
-                    FlatOutlineEntry(
-                        item = item,
-                        level = level,
-                        hasChildren = hasChildren,
-                        isExpanded = isExpanded
-                    )
-                )
-                if (hasChildren && isExpanded) {
-                    list.addAll(flatten(item.children, level + 1))
-                }
+    // Single linear pass computing visible flat indices: root is visible, child is visible iff parent is visible & expanded
+    val visibleRowIndices = remember(outlineIndex, expandedStates) {
+        val idx = outlineIndex ?: return@remember emptyList()
+        val n = idx.flat.size
+        if (n == 0) return@remember emptyList()
+        val isVisible = BooleanArray(n)
+        val result = ArrayList<Int>(n)
+        val items = idx.flat
+        val parents = idx.parentIndex
+        for (i in 0 until n) {
+            val p = parents[i]
+            val visible = if (p < 0) {
+                true
+            } else {
+                isVisible[p] && (expandedStates[items[p].id] ?: true)
             }
-            return list
+            isVisible[i] = visible
+            if (visible) {
+                result.add(i)
+            }
         }
-        flatten(outlineItems)
+        result
     }
 
-    // Initialize list state with the remembered scroll position
-    val startScrollIndex = if (initialScrollIndex >= 0) initialScrollIndex.coerceIn(0, (flatItems.size - 1).coerceAtLeast(0)) else 0
+    val startScrollIndex = if (initialScrollIndex >= 0) {
+        initialScrollIndex.coerceIn(0, (visibleRowIndices.size - 1).coerceAtLeast(0))
+    } else {
+        0
+    }
     val startScrollOffset = if (initialScrollIndex >= 0) initialScrollOffset else 0
     val listState = rememberLazyListState(
         initialFirstVisibleItemIndex = startScrollIndex,
         initialFirstVisibleItemScrollOffset = startScrollOffset
     )
 
-    // On the very first visit (when initialScrollIndex < 0), auto-scroll to the current reading page's chapter
-    LaunchedEffect(flatItems) {
-        if (initialScrollIndex < 0 && flatItems.isNotEmpty() && searchQuery.isBlank()) {
-            val targetIdx = flatItems.indexOfLast { it.item.pageIndex <= currentPageIndex }
-            if (targetIdx >= 0) {
-                listState.scrollToItem(targetIdx)
+    // First-open auto-scroll to the active chapter using chapterForPage[currentPageIndex]
+    LaunchedEffect(visibleRowIndices, outlineIndex) {
+        if (initialScrollIndex < 0 && visibleRowIndices.isNotEmpty() && searchQuery.isBlank() && outlineIndex != null) {
+            val chapterMap = outlineIndex.chapterForPage
+            if (chapterMap.isNotEmpty()) {
+                val clampedPage = currentPageIndex.coerceIn(0, chapterMap.size - 1)
+                val targetFlatIdx = chapterMap[clampedPage]
+                if (targetFlatIdx >= 0) {
+                    val bs = visibleRowIndices.binarySearch(targetFlatIdx)
+                    val targetVisibleIdx = if (bs >= 0) bs else (-bs - 2).coerceAtLeast(0)
+                    listState.scrollToItem(targetVisibleIdx)
+                }
             }
         }
     }
@@ -216,7 +224,6 @@ fun IndexSheet(
         }
     }
 
-    // Fullscreen Dialog matching Xodo and ReadEra experience
     Dialog(
         onDismissRequest = {
             if (searchQuery.isBlank()) {
@@ -237,7 +244,6 @@ fun IndexSheet(
             color = MaterialTheme.colorScheme.background
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
-                // Top App Bar with Back Arrow, Document Title, and Close
                 TopAppBar(
                     title = {
                         Column {
@@ -251,8 +257,8 @@ fun IndexSheet(
                             Text(
                                 text = when {
                                     isLoading -> "Indexing document structure in background..."
-                                    searchQuery.isNotBlank() -> "${searchResults.size} of $totalNodesCount chapters found"
-                                    outlineItems.isNotEmpty() -> "$totalNodesCount chapters found"
+                                    searchQuery.isNotBlank() -> "${searchState.indices.size} of $totalNodesCount chapters found"
+                                    flat.isNotEmpty() -> "$totalNodesCount chapters found"
                                     else -> "Table of Contents"
                                 },
                                 style = MaterialTheme.typography.bodySmall,
@@ -297,8 +303,7 @@ fun IndexSheet(
                     )
                 )
 
-                // Search Bar Section (Available whenever outline items exist or are indexing)
-                if (outlineItems.isNotEmpty() || searchQuery.isNotEmpty()) {
+                if (flat.isNotEmpty() || searchQuery.isNotEmpty()) {
                     Surface(
                         color = MaterialTheme.colorScheme.surface,
                         modifier = Modifier.fillMaxWidth()
@@ -357,8 +362,7 @@ fun IndexSheet(
                     }
                 }
 
-                // Sub-header navigation & Quick expand/collapse toolbar (When not in search mode)
-                if (searchQuery.isBlank() && outlineItems.isNotEmpty()) {
+                if (searchQuery.isBlank() && flat.isNotEmpty()) {
                     Surface(
                         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
                         modifier = Modifier.fillMaxWidth()
@@ -370,7 +374,6 @@ fun IndexSheet(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            // CONTENTS Tab Indicator
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Icon(
                                     imageVector = Icons.AutoMirrored.Filled.Toc,
@@ -388,13 +391,10 @@ fun IndexSheet(
                                 )
                             }
 
-                            // Expand / Collapse All Controls
                             if (expandableIds.isNotEmpty()) {
                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     FilledTonalButton(
-                                        onClick = {
-                                            onSetAllExpanded(expandableIds, true)
-                                        },
+                                        onClick = { onSetAllExpanded(expandableIds, true) },
                                         shape = RoundedCornerShape(10.dp),
                                         contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                                         modifier = Modifier
@@ -415,9 +415,7 @@ fun IndexSheet(
                                     }
 
                                     FilledTonalButton(
-                                        onClick = {
-                                            onSetAllExpanded(expandableIds, false)
-                                        },
+                                        onClick = { onSetAllExpanded(expandableIds, false) },
                                         shape = RoundedCornerShape(10.dp),
                                         contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                                         modifier = Modifier
@@ -445,8 +443,8 @@ fun IndexSheet(
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
 
                 when {
-                    // 1. Loading State (Indexing in progress and no cached items yet)
-                    isLoading && outlineItems.isEmpty() -> {
+                    // 1. Loading State
+                    isLoading && flat.isEmpty() -> {
                         Box(
                             modifier = Modifier
                                 .fillMaxSize()
@@ -484,8 +482,10 @@ fun IndexSheet(
                     }
 
                     // 2. Active Search Results
-                    searchQuery.isNotBlank() -> {
-                        if (searchResults.isEmpty()) {
+                    searchQuery.isNotBlank() && outlineIndex != null -> {
+                        val activeMatches = searchState.indices
+                        val isDebouncing = searchQuery.trim() != searchState.query
+                        if (activeMatches.isEmpty() && !isDebouncing) {
                             Box(
                                 modifier = Modifier
                                     .fillMaxSize()
@@ -543,12 +543,14 @@ fun IndexSheet(
                                 contentPadding = PaddingValues(vertical = 4.dp)
                             ) {
                                 items(
-                                    items = searchResults,
-                                    key = { "search_${it.item.id}" }
-                                ) { result ->
+                                    items = activeMatches,
+                                    key = { "search_${flat[it].id}" },
+                                    contentType = { "search_row" }
+                                ) { flatIdx ->
                                     SearchResultRow(
-                                        result = result,
-                                        query = searchQuery,
+                                        flatIndex = flatIdx,
+                                        outlineIndex = outlineIndex,
+                                        query = searchState.query.ifEmpty { searchQuery },
                                         currentPageIndex = currentPageIndex,
                                         onJumpToPage = { page ->
                                             onJumpToPage(page)
@@ -560,8 +562,8 @@ fun IndexSheet(
                         }
                     }
 
-                    // 3. Genuinely Empty State (Parsed, finished loading, but document has no outline)
-                    outlineItems.isEmpty() -> {
+                    // 3. Honest Empty State + Diagnostic + Retry Indexing
+                    flat.isEmpty() -> {
                         Box(
                             modifier = Modifier
                                 .fillMaxSize()
@@ -595,12 +597,31 @@ fun IndexSheet(
                                 )
                                 Spacer(modifier = Modifier.height(8.dp))
                                 Text(
-                                    text = "This PDF document does not have an embedded table of contents or outline hierarchy.",
-                                    style = MaterialTheme.typography.bodyMedium,
+                                    text = "This PDF may not contain embedded bookmarks.",
+                                    style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     textAlign = TextAlign.Center,
                                     modifier = Modifier.padding(horizontal = 24.dp)
                                 )
+                                if (diagnosticText.isNotBlank()) {
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Text(
+                                        text = diagnosticText,
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            fontFamily = FontFamily.Monospace
+                                        ),
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                        textAlign = TextAlign.Center,
+                                        modifier = Modifier.padding(horizontal = 24.dp)
+                                    )
+                                }
+                                Spacer(modifier = Modifier.height(20.dp))
+                                OutlinedButton(
+                                    onClick = onRetryIndexing,
+                                    modifier = Modifier.testTag("index_retry_btn")
+                                ) {
+                                    Text("Retry indexing")
+                                }
                             }
                         }
                     }
@@ -615,13 +636,19 @@ fun IndexSheet(
                             contentPadding = PaddingValues(vertical = 4.dp)
                         ) {
                             items(
-                                items = flatItems,
-                                key = { it.item.id }
-                            ) { flatEntry ->
+                                items = visibleRowIndices,
+                                key = { flat[it].id },
+                                contentType = { "outline_row" }
+                            ) { flatIdx ->
+                                val item = flat[flatIdx]
+                                val hasChildren = item.children.isNotEmpty()
+                                val isExpanded = expandedStates[item.id] ?: true
                                 FlatOutlineItemRow(
-                                    entry = flatEntry,
+                                    item = item,
+                                    hasChildren = hasChildren,
+                                    isExpanded = isExpanded,
                                     currentPageIndex = currentPageIndex,
-                                    onToggleExpand = { onToggleExpand(flatEntry.item.id) },
+                                    onToggleExpand = { onToggleExpand(item.id) },
                                     onJumpToPage = { page ->
                                         onSaveScrollPosition(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset)
                                         onJumpToPage(page)
@@ -637,17 +664,33 @@ fun IndexSheet(
     }
 }
 
+private fun buildBreadcrumb(outlineIndex: OutlineIndex, flatIndex: Int): String? {
+    var p = outlineIndex.parentIndex[flatIndex]
+    if (p < 0) return null
+    val ancestors = ArrayList<String>(4)
+    val items = outlineIndex.flat
+    while (p >= 0) {
+        ancestors.add(items[p].title)
+        p = outlineIndex.parentIndex[p]
+    }
+    ancestors.reverse()
+    return ancestors.joinToString(" › ")
+}
+
 @Composable
 private fun SearchResultRow(
-    result: SearchResultEntry,
+    flatIndex: Int,
+    outlineIndex: OutlineIndex,
     query: String,
     currentPageIndex: Int,
     onJumpToPage: (Int) -> Unit
 ) {
-    val item = result.item
+    val item = outlineIndex.flat[flatIndex]
     val isCurrent = item.pageIndex == currentPageIndex
+    val parentBreadcrumb = remember(flatIndex, outlineIndex) {
+        buildBreadcrumb(outlineIndex, flatIndex)
+    }
 
-    // Highlight query text in title
     val highlightedTitle = remember(item.title, query) {
         val text = item.title
         val lowerText = text.lowercase()
@@ -690,27 +733,20 @@ private fun SearchResultRow(
             },
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable {
-                    onJumpToPage(item.pageIndex + 1)
-                }
+                .clickable { onJumpToPage(item.pageIndex + 1) }
                 .testTag("search_item_${item.id}")
         ) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(
-                        start = 16.dp,
-                        end = 16.dp,
-                        top = 12.dp,
-                        bottom = 12.dp
-                    ),
+                    .padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Column(modifier = Modifier.weight(1f)) {
-                    if (result.parentBreadcrumb != null) {
+                    if (parentBreadcrumb != null) {
                         Text(
-                            text = result.parentBreadcrumb,
+                            text = parentBreadcrumb,
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
                             maxLines = 1,
@@ -763,14 +799,15 @@ private fun SearchResultRow(
 
 @Composable
 private fun FlatOutlineItemRow(
-    entry: FlatOutlineEntry,
+    item: PdfOutlineItem,
+    hasChildren: Boolean,
+    isExpanded: Boolean,
     currentPageIndex: Int,
     onToggleExpand: () -> Unit,
     onJumpToPage: (Int) -> Unit
 ) {
-    val item = entry.item
     val isCurrent = item.pageIndex == currentPageIndex
-    val indentDp = entry.level * 16
+    val indentDp = item.level * 16
 
     Column(modifier = Modifier.fillMaxWidth()) {
         Surface(
@@ -781,9 +818,7 @@ private fun FlatOutlineItemRow(
             },
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable {
-                    onJumpToPage(item.pageIndex + 1)
-                }
+                .clickable { onJumpToPage(item.pageIndex + 1) }
                 .testTag("outline_item_${item.id}")
         ) {
             Row(
@@ -798,14 +833,13 @@ private fun FlatOutlineItemRow(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                // Chapter Title + Indentation
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.weight(1f)
                 ) {
                     Text(
                         text = item.title,
-                        style = when (entry.level) {
+                        style = when (item.level) {
                             0 -> MaterialTheme.typography.bodyLarge.copy(
                                 fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Medium
                             )
@@ -828,8 +862,7 @@ private fun FlatOutlineItemRow(
 
                 Spacer(modifier = Modifier.width(12.dp))
 
-                // Chevron icon for expandable sub-chapters
-                if (entry.hasChildren) {
+                if (hasChildren) {
                     IconButton(
                         onClick = onToggleExpand,
                         modifier = Modifier
@@ -837,8 +870,8 @@ private fun FlatOutlineItemRow(
                             .testTag("toggle_expand_${item.id}")
                     ) {
                         Icon(
-                            imageVector = if (entry.isExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                            contentDescription = if (entry.isExpanded) "Collapse chapter" else "Expand chapter",
+                            imageVector = if (isExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                            contentDescription = if (isExpanded) "Collapse chapter" else "Expand chapter",
                             tint = if (isCurrent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.size(20.dp)
                         )
@@ -846,7 +879,6 @@ private fun FlatOutlineItemRow(
                     Spacer(modifier = Modifier.width(4.dp))
                 }
 
-                // Clean Page Number (Right-aligned, high contrast)
                 Text(
                     text = "${item.pageIndex + 1}",
                     style = MaterialTheme.typography.bodyMedium,

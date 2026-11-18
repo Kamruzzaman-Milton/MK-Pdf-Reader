@@ -9,6 +9,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.data.db.AppDatabase
 import com.example.data.db.PdfBookmarkEntity
 import com.example.data.pdf.OutlineHelper
+import com.example.data.pdf.OutlineIndex
 import com.example.data.pdf.PdfDocumentInfo
 import com.example.data.pdf.PdfDocumentStorage
 import com.example.data.pdf.PdfOutlineItem
@@ -27,6 +28,7 @@ import com.example.data.settings.ReaderOrientation
 import com.example.data.settings.ReadingStats
 import com.example.data.settings.RenderSharpness
 import com.example.data.settings.SettingsRepository
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -39,6 +41,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 data class PdfReaderUiState(
     val isLoading: Boolean = true,
@@ -66,7 +69,9 @@ data class PdfReaderUiState(
     val bookmarkedPages: Set<Int> = emptySet(),
     val isCurrentPageBookmarked: Boolean = false,
     val outlineItems: List<PdfOutlineItem> = emptyList(),
+    val outlineIndex: OutlineIndex? = null,
     val currentChapterTitle: String? = null,
+    val outlineDiagnostic: String = "",
     val isLoadingOutline: Boolean = false,
     val hasOutlineLoaded: Boolean = false,
     val indexExpandedStates: Map<String, Boolean> = emptyMap(),
@@ -123,8 +128,53 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun loadPdf(uri: Uri, isSample: Boolean = false) {
         currentLoadedUri = uri
+        PdfOutlineParser.activeDocumentUri = uri.toString()
+        outlineJob?.cancel()
+        outlineJob = null
+
         viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = true, errorMessage = null) }
+            _uiState.update {
+                it.copy(
+                    isLoading = true,
+                    errorMessage = null,
+                    outlineItems = emptyList(),
+                    outlineIndex = null,
+                    currentChapterTitle = null,
+                    outlineDiagnostic = "",
+                    isLoadingOutline = true,
+                    hasOutlineLoaded = false,
+                    indexExpandedStates = emptyMap(),
+                    indexScrollIndex = -1,
+                    indexScrollOffset = 0
+                )
+            }
+
+            // Synchronous L1/L2 cache check for instant hit, then launch outlineJob immediately in parallel with engine init
+            val cachedOutline = PdfOutlineParser.loadCachedOutline(getApplication(), uri)
+            val pageCountDeferred = CompletableDeferred<Int>()
+            val initialPageDeferred = CompletableDeferred<Int>()
+
+            outlineJob = viewModelScope.launch(Dispatchers.IO) {
+                val outline = cachedOutline ?: PdfOutlineParser.parseOutline(getApplication(), uri, 0)
+                val resolvedPageCount = pageCountDeferred.await()
+                if (resolvedPageCount <= 0) return@launch
+                val index = withContext(Dispatchers.Default) {
+                    OutlineHelper.buildIndex(outline, resolvedPageCount)
+                }
+                val startPage = initialPageDeferred.await()
+                val activeChapter = OutlineHelper.getCurrentChapter(startPage, index)
+                val diag = if (outline.isEmpty()) PdfOutlineParser.lastDiagnostic(uri) else ""
+                _uiState.update {
+                    it.copy(
+                        outlineItems = outline,
+                        outlineIndex = index,
+                        currentChapterTitle = activeChapter?.title,
+                        outlineDiagnostic = diag,
+                        isLoadingOutline = false,
+                        hasOutlineLoaded = true
+                    )
+                }
+            }
 
             // Clean up previous engine if any
             engine?.close()
@@ -133,6 +183,10 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
             val initialized = newEngine.initialize()
 
             if (!initialized || newEngine.pageCount == 0) {
+                outlineJob?.cancel()
+                pageCountDeferred.cancel()
+                initialPageDeferred.cancel()
+
                 val hasStorageAccess = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                     Environment.isExternalStorageManager()
                 } else true
@@ -146,6 +200,7 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
                 _uiState.update {
                     it.copy(
                         isLoading = false,
+                        isLoadingOutline = false,
                         errorMessage = message
                     )
                 }
@@ -154,12 +209,14 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
 
             engine = newEngine
             val pageCount = newEngine.pageCount
+            pageCountDeferred.complete(pageCount)
 
             // Resolve document metadata and check for saved progress
             val docInfo = repository.resolveDocumentInfo(uri, pageCount, isSample)
             val recentRecord = repository.getRecentByUri(uri.toString())
 
             val initialPage = recentRecord?.lastReadPage?.coerceIn(0, (pageCount - 1).coerceAtLeast(0)) ?: 0
+            initialPageDeferred.complete(initialPage)
             val initialMode = recentRecord?.readingMode?.let {
                 try {
                     ReadingMode.valueOf(it)
@@ -167,10 +224,6 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
                     ReadingMode.VERTICAL
                 }
             } ?: ReadingMode.VERTICAL
-
-            // Instantly load cached Table of Contents / Outline if previously generated
-            val cachedOutline = PdfOutlineParser.loadCachedOutline(getApplication(), uri)
-            val isOutlineCached = cachedOutline != null
 
             val keepAwake = appSettings.value.keepAwakeOption
             val initialWake = keepAwake == KeepAwakeOption.ALWAYS_ON || (keepAwake != KeepAwakeOption.OFF && keepAwake != KeepAwakeOption.SYSTEM_DEFAULT && keepAwake.durationMs > 0L)
@@ -182,9 +235,6 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
                     currentPage = initialPage,
                     totalPages = pageCount,
                     readingMode = initialMode,
-                    outlineItems = cachedOutline ?: emptyList(),
-                    isLoadingOutline = !isOutlineCached,
-                    hasOutlineLoaded = isOutlineCached,
                     zoomScale = 1.0f,
                     panOffsetX = 0f,
                     panOffsetY = 0f,
@@ -208,31 +258,6 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
                             isCurrentPageBookmarked = state.currentPage in set
                         )
                     }
-                }
-            }
-
-            // If not in cache, start background outline indexing immediately
-            outlineJob?.cancel()
-            if (!isOutlineCached) {
-                outlineJob = viewModelScope.launch(Dispatchers.IO) {
-                    val outline = PdfOutlineParser.parseOutline(getApplication(), uri, pageCount)
-                    val activeChapter = OutlineHelper.getCurrentChapter(initialPage, outline)
-                    _uiState.update {
-                        it.copy(
-                            outlineItems = outline,
-                            currentChapterTitle = activeChapter?.title,
-                            isLoadingOutline = false,
-                            hasOutlineLoaded = true
-                        )
-                    }
-                }
-            } else {
-                val cached = PdfOutlineParser.loadCachedOutline(getApplication(), uri) ?: emptyList()
-                val activeChapter = OutlineHelper.getCurrentChapter(initialPage, cached)
-                _uiState.update {
-                    it.copy(
-                        currentChapterTitle = activeChapter?.title
-                    )
                 }
             }
 
@@ -270,12 +295,56 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    fun reloadOutline() {
+        val uri = currentLoadedUri ?: _uiState.value.documentInfo?.uri ?: return
+        val totalPages = _uiState.value.totalPages
+        if (totalPages <= 0) return
+
+        outlineJob?.cancel()
+        PdfOutlineParser.deleteOutlineCache(getApplication(), uri)
+
+        _uiState.update {
+            it.copy(
+                outlineItems = emptyList(),
+                outlineIndex = null,
+                currentChapterTitle = null,
+                outlineDiagnostic = "",
+                isLoadingOutline = true,
+                hasOutlineLoaded = false,
+                indexExpandedStates = emptyMap(),
+                indexScrollIndex = -1,
+                indexScrollOffset = 0
+            )
+        }
+
+        outlineJob = viewModelScope.launch(Dispatchers.IO) {
+            val outline = PdfOutlineParser.parseOutline(getApplication(), uri, totalPages)
+            val index = withContext(Dispatchers.Default) {
+                OutlineHelper.buildIndex(outline, totalPages)
+            }
+            val currentPage = _uiState.value.currentPage
+            val activeChapter = OutlineHelper.getCurrentChapter(currentPage, index)
+            val diag = if (outline.isEmpty()) PdfOutlineParser.lastDiagnostic(uri) else ""
+            _uiState.update {
+                it.copy(
+                    outlineItems = outline,
+                    outlineIndex = index,
+                    currentChapterTitle = activeChapter?.title,
+                    outlineDiagnostic = diag,
+                    isLoadingOutline = false,
+                    hasOutlineLoaded = true
+                )
+            }
+        }
+    }
+
     fun onPageChanged(newPageIndex: Int) {
-        val total = _uiState.value.totalPages
+        val state = _uiState.value
+        val total = state.totalPages
         if (total == 0) return
         val clamped = newPageIndex.coerceIn(0, total - 1)
-        if (_uiState.value.currentPage != clamped) {
-            val chapter = OutlineHelper.getCurrentChapter(clamped, _uiState.value.outlineItems)
+        if (state.currentPage != clamped) {
+            val chapter = state.outlineIndex?.let { OutlineHelper.getCurrentChapter(clamped, it) }
             _uiState.update {
                 it.copy(
                     currentPage = clamped,
@@ -309,8 +378,9 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun jumpToPage(pageNumber1Indexed: Int) {
-        val target0Indexed = (pageNumber1Indexed - 1).coerceIn(0, (_uiState.value.totalPages - 1).coerceAtLeast(0))
-        val chapter = OutlineHelper.getCurrentChapter(target0Indexed, _uiState.value.outlineItems)
+        val state = _uiState.value
+        val target0Indexed = (pageNumber1Indexed - 1).coerceIn(0, (state.totalPages - 1).coerceAtLeast(0))
+        val chapter = state.outlineIndex?.let { OutlineHelper.getCurrentChapter(target0Indexed, it) }
         _uiState.update {
             it.copy(
                 currentPage = target0Indexed,
@@ -400,7 +470,7 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
         val chapterTitle = if (pageIndex == _uiState.value.currentPage) {
             _uiState.value.currentChapterTitle?.takeIf { it.isNotBlank() }
         } else {
-            OutlineHelper.getCurrentChapter(pageIndex, _uiState.value.outlineItems)?.title?.takeIf { it.isNotBlank() }
+            _uiState.value.outlineIndex?.let { OutlineHelper.getCurrentChapter(pageIndex, it)?.title?.takeIf { t -> t.isNotBlank() } }
         }
         viewModelScope.launch {
             val added = repository.toggleBookmark(doc.uri.toString(), pageIndex, title = chapterTitle)
@@ -467,9 +537,12 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun setAllIndexExpanded(expandableIds: List<String>, isExpanded: Boolean) {
         _uiState.update { state ->
-            val updated = state.indexExpandedStates.toMutableMap()
-            expandableIds.forEach { id -> updated[id] = isExpanded }
-            state.copy(indexExpandedStates = updated)
+            val newMap = if (isExpanded) {
+                emptyMap()
+            } else {
+                state.outlineIndex?.collapsedAllMap ?: expandableIds.associateWith { false }
+            }
+            state.copy(indexExpandedStates = newMap)
         }
     }
 
@@ -753,6 +826,9 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
      * Requirement 5: Called when user closes a PDF.
      */
     fun recordClose() {
+        outlineJob?.cancel()
+        outlineJob = null
+        PdfOutlineParser.activeDocumentUri = null
         readingTickerJob?.cancel()
         readingTickerJob = null
         _uiState.update { it.copy(isAutoScrolling = false) }

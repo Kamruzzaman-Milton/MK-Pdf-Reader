@@ -306,16 +306,18 @@ fun PdfReaderScreen(
 
     if (uiState.showIndexSheet) {
         IndexSheet(
-            outlineItems = uiState.outlineItems,
+            outlineIndex = uiState.outlineIndex,
             isLoading = uiState.isLoadingOutline,
             currentPageIndex = uiState.currentPage,
             documentTitle = uiState.documentInfo?.fileName ?: "Table of Contents",
+            diagnosticText = uiState.outlineDiagnostic,
             expandedStates = uiState.indexExpandedStates,
             initialScrollIndex = uiState.indexScrollIndex,
             initialScrollOffset = uiState.indexScrollOffset,
             onToggleExpand = { id -> viewModel.toggleIndexItemExpansion(id) },
             onSetAllExpanded = { ids, isExpanded -> viewModel.setAllIndexExpanded(ids, isExpanded) },
             onSaveScrollPosition = { index, offset -> viewModel.saveIndexScrollPosition(index, offset) },
+            onRetryIndexing = { viewModel.reloadOutline() },
             onDismiss = { viewModel.showIndexSheet(false) },
             onJumpToPage = { pageNum -> viewModel.jumpToPage(pageNum) }
         )

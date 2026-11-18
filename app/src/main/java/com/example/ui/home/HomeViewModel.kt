@@ -7,6 +7,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.data.db.AppDatabase
 import com.example.data.db.PdfRecentItem
 import com.example.data.pdf.PdfDocumentStorage
+import com.example.data.pdf.PdfOutlineParser
 import com.example.data.pdf.SamplePdfGenerator
 import com.example.data.repository.PdfRepository
 import com.example.data.settings.AppAccent
@@ -16,16 +17,25 @@ import com.example.data.settings.LibraryFilter
 import com.example.data.settings.LibrarySort
 import com.example.data.settings.RecentViewMode
 import com.example.data.settings.SettingsRepository
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.Locale
 
 class HomeViewModel(application: Application) : AndroidViewModel(application) {
+
+    companion object {
+        @Volatile
+        private var hasWarmedUpOutlines: Boolean = false
+    }
 
     private val repository: PdfRepository = run {
         val db = AppDatabase.getDatabase(application)
@@ -36,8 +46,38 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     val appSettings: StateFlow<AppSettings> = settingsRepository.settings
 
     init {
-        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+        viewModelScope.launch(Dispatchers.IO) {
             repository.syncRecentsOnStartup()
+            warmUpOutlines()
+        }
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private fun warmUpOutlines() {
+        synchronized(HomeViewModel) {
+            if (hasWarmedUpOutlines) return
+            hasWarmedUpOutlines = true
+        }
+        viewModelScope.launch(Dispatchers.IO.limitedParallelism(1)) {
+            try {
+                delay(3_000L)
+                val appContext = getApplication<Application>()
+                val recents = repository.getRecentPDFs()
+                for (item in recents) {
+                    if (!isActive) break
+                    val uriStr = item.uriString
+                    if (uriStr.isBlank() || uriStr == PdfOutlineParser.activeDocumentUri) continue
+                    try {
+                        val uri = Uri.parse(uriStr)
+                        if (PdfOutlineParser.hasDiskCache(appContext, uri)) continue
+                        PdfOutlineParser.parseOutline(appContext, uri, item.pageCount)
+                    } catch (_: Throwable) {
+                        // Ignore failures silently
+                    }
+                }
+            } catch (_: Throwable) {
+                // Ignore failures silently
+            }
         }
     }
 
