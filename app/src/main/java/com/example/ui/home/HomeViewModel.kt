@@ -4,8 +4,14 @@ import android.app.Application
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.data.backup.BackupExportSummary
+import com.example.data.backup.BackupImportSummary
+import com.example.data.backup.BackupManager
 import com.example.data.db.AppDatabase
 import com.example.data.db.PdfRecentItem
+import com.example.data.library.LibraryPdf
+import com.example.data.library.LibraryRepository
+import com.example.data.library.LibraryThumbnailStore
 import com.example.data.pdf.PdfDocumentStorage
 import com.example.data.pdf.PdfOutlineParser
 import com.example.data.pdf.SamplePdfGenerator
@@ -26,9 +32,11 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.Locale
 
 class HomeViewModel(application: Application) : AndroidViewModel(application) {
@@ -44,7 +52,15 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private val settingsRepository: SettingsRepository = SettingsRepository.getInstance(application)
+    private val libraryRepository: LibraryRepository = LibraryRepository.getInstance(application)
     val appSettings: StateFlow<AppSettings> = settingsRepository.settings
+
+    private val _homeSearchQuery = MutableStateFlow("")
+    private val _storageUsedBytes = MutableStateFlow(0L)
+    val storageUsedBytes: StateFlow<Long> = _storageUsedBytes.asStateFlow()
+
+    private val _isBackupBusy = MutableStateFlow(false)
+    val isBackupBusy: StateFlow<Boolean> = _isBackupBusy.asStateFlow()
 
     init {
         viewModelScope.launch(Dispatchers.IO) {
@@ -134,6 +150,92 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         started = SharingStarted.WhileSubscribed(5000),
         initialValue = emptyList()
     )
+
+    val librarySearchResults: StateFlow<List<LibraryPdf>> = combine(
+        _homeSearchQuery,
+        libraryRepository.tree
+    ) { query, _ ->
+        val trimmed = query.trim()
+        if (trimmed.length < 2) {
+            emptyList()
+        } else {
+            libraryRepository.searchByName(trimmed, limit = 20)
+        }
+    }
+        .flowOn(Dispatchers.Default)
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = emptyList()
+        )
+
+    fun setHomeSearchQuery(query: String) {
+        _homeSearchQuery.value = query
+    }
+
+    fun refreshStorageUsed() {
+        viewModelScope.launch {
+            _storageUsedBytes.value = BackupManager.computeStorageUsedBytes(getApplication())
+        }
+    }
+
+    fun clearLibThumbnailCache() {
+        viewModelScope.launch {
+            LibraryThumbnailStore.clearLibThumbCache(getApplication())
+            _storageUsedBytes.value = BackupManager.computeStorageUsedBytes(getApplication())
+        }
+    }
+
+    fun clearTocCache() {
+        viewModelScope.launch(Dispatchers.IO) {
+            PdfOutlineParser.clearAllOutlineCaches(getApplication())
+            _storageUsedBytes.value = BackupManager.computeStorageUsedBytes(getApplication())
+        }
+    }
+
+    fun exportBackup(
+        destUri: Uri,
+        includeThumbnails: Boolean,
+        onResult: (Result<BackupExportSummary>) -> Unit
+    ) {
+        viewModelScope.launch {
+            _isBackupBusy.value = true
+            try {
+                val res = BackupManager.exportBackup(getApplication(), destUri, includeThumbnails)
+                withContext(Dispatchers.Main) {
+                    onResult(res)
+                }
+            } finally {
+                _isBackupBusy.value = false
+            }
+        }
+    }
+
+    fun importBackup(
+        srcUri: Uri,
+        onResult: (Result<BackupImportSummary>) -> Unit
+    ) {
+        viewModelScope.launch {
+            _isBackupBusy.value = true
+            try {
+                val res = BackupManager.importBackup(getApplication(), srcUri)
+                if (res.isSuccess) {
+                    withContext(Dispatchers.IO) {
+                        repository.reloadRecentsFromDirectory()
+                    }
+                    _storageUsedBytes.value = BackupManager.computeStorageUsedBytes(getApplication())
+                    launch {
+                        libraryRepository.rescan(null)
+                    }
+                }
+                withContext(Dispatchers.Main) {
+                    onResult(res)
+                }
+            } finally {
+                _isBackupBusy.value = false
+            }
+        }
+    }
 
     fun refreshRecents() {
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {

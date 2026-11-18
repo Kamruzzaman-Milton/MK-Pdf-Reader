@@ -7,6 +7,8 @@ import android.os.Build
 import android.os.Environment
 import android.provider.Settings
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -25,6 +27,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -50,21 +53,28 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.AutoStories
 import androidx.compose.material.icons.filled.BrightnessAuto
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.ClearAll
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PictureAsPdf
+import androidx.compose.material.icons.filled.Restore
+import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
+import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.ViewList
+import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.runtime.DisposableEffect
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -73,6 +83,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -85,6 +97,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.material3.Scaffold
@@ -107,12 +120,17 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -123,7 +141,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
+import com.example.data.backup.BackupManager
 import com.example.data.db.PdfRecentItem
+import com.example.data.library.LibraryPdf
+import com.example.data.library.LibraryRoot
+import com.example.data.library.LibraryRootStatus
+import com.example.data.library.LibraryThumbnailStore
+import com.example.data.library.ScanState
 import com.example.data.pdf.PdfDocumentStorage
 import com.example.data.settings.AppAccent
 import com.example.data.settings.AppSettings
@@ -142,16 +166,27 @@ fun HomeScreen(
     viewModel: HomeViewModel,
     onOpenPdfUri: (Uri) -> Unit,
     onLaunchFilePicker: () -> Unit,
+    libraryRoots: List<LibraryRoot> = emptyList(),
+    libraryScanState: ScanState = ScanState.Idle,
+    onOpenLibraryFolder: (String) -> Unit = {},
+    onOpenLibrarySettings: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val recentPdfs by viewModel.recentPdfs.collectAsStateWithLifecycle()
     val visibleRecents by viewModel.visibleRecents.collectAsStateWithLifecycle()
+    val librarySearchResults by viewModel.librarySearchResults.collectAsStateWithLifecycle()
+    val storageUsedBytes by viewModel.storageUsedBytes.collectAsStateWithLifecycle()
+    val isBackupBusy by viewModel.isBackupBusy.collectAsStateWithLifecycle()
     val appSettings by viewModel.appSettings.collectAsStateWithLifecycle()
     val isGeneratingSample by viewModel.isGeneratingSample.collectAsStateWithLifecycle()
 
     var showMoreMenu by remember { mutableStateOf(false) }
     var showSettingsSheet by remember { mutableStateOf(false) }
     var showClearConfirmation by remember { mutableStateOf(false) }
+    var showExportDialog by remember { mutableStateOf(false) }
+    var includeThumbnailsInBackup by remember { mutableStateOf(true) }
+    var backupResultTitle by remember { mutableStateOf<String?>(null) }
+    var backupResultMessage by remember { mutableStateOf<String?>(null) }
     var isSearchActive by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
     val searchFocusRequester = remember { FocusRequester() }
@@ -208,10 +243,52 @@ fun HomeScreen(
         }
     }
 
+    val exportBackupLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/zip")
+    ) { destUri: Uri? ->
+        if (destUri != null) {
+            viewModel.exportBackup(destUri, includeThumbnailsInBackup) { res ->
+                res.onSuccess { summary ->
+                    backupResultTitle = "Backup Exported"
+                    val thumbsPart = if (summary.thumbnailsCount > 0) {
+                        ", ${summary.thumbnailsCount} thumbnails"
+                    } else ""
+                    backupResultMessage = "Saved ${summary.recentsCount} recents, ${summary.bookmarksCount} bookmarks, ${summary.libraryRootsCount} folders$thumbsPart."
+                }.onFailure { err ->
+                    backupResultTitle = "Backup Export Failed"
+                    backupResultMessage = err.message ?: "Unable to write backup archive."
+                }
+            }
+        }
+    }
+
+    val importBackupLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { srcUri: Uri? ->
+        if (srcUri != null) {
+            viewModel.importBackup(srcUri) { res ->
+                res.onSuccess { summary ->
+                    backupResultTitle = "Backup Imported"
+                    val thumbsPart = if (summary.thumbnailsRestored > 0) {
+                        " (${summary.thumbnailsRestored} thumbnails)"
+                    } else ""
+                    backupResultMessage = "Restored ${summary.recentsRestored} recents, ${summary.bookmarksRestored} bookmarks, ${summary.rootsRestored} folders$thumbsPart."
+                }.onFailure { err ->
+                    backupResultTitle = "Invalid Backup File"
+                    backupResultMessage = err.message ?: "The selected file is not a valid MK PDF Reader backup."
+                }
+            }
+        }
+    }
+
     LaunchedEffect(isSearchActive) {
         if (isSearchActive) {
             searchFocusRequester.requestFocus()
         }
+    }
+
+    LaunchedEffect(isSearchActive, searchQuery) {
+        viewModel.setHomeSearchQuery(if (isSearchActive) searchQuery else "")
     }
 
     BackHandler(enabled = isSearchActive) {
@@ -439,6 +516,17 @@ fun HomeScreen(
                     horizontalArrangement = Arrangement.spacedBy(14.dp),
                     verticalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
+                    if (!isSearchActive) {
+                        item(span = { GridItemSpan(maxLineSpan) }) {
+                            LibraryFolderStrip(
+                                roots = libraryRoots,
+                                scanState = libraryScanState,
+                                onOpenRoot = { root -> onOpenLibraryFolder("${root.id}|") },
+                                onOpenSettings = onOpenLibrarySettings
+                            )
+                        }
+                    }
+
                     if (!hasFullStorageAccess && showStorageBanner) {
                         item(span = { GridItemSpan(maxLineSpan) }) {
                             StorageAccessBanner(
@@ -479,7 +567,9 @@ fun HomeScreen(
                         )
                     }
 
-                    if (recentPdfs.isEmpty()) {
+                    val hasLibraryMatches = isSearchActive && searchQuery.trim().length >= 2 && librarySearchResults.isNotEmpty()
+
+                    if (recentPdfs.isEmpty() && !hasLibraryMatches && (!isSearchActive || searchQuery.isBlank())) {
                         item(span = { GridItemSpan(maxLineSpan) }) {
                             EmptyRecentsView(
                                 onOpenSample = {
@@ -488,7 +578,7 @@ fun HomeScreen(
                                 isGeneratingSample = isGeneratingSample
                             )
                         }
-                    } else if (filteredPdfs.isEmpty()) {
+                    } else if (filteredPdfs.isEmpty() && !hasLibraryMatches) {
                         item(span = { GridItemSpan(maxLineSpan) }) {
                             if (searchQuery.isNotBlank()) {
                                 NoSearchResultsView(searchQuery = searchQuery)
@@ -499,7 +589,7 @@ fun HomeScreen(
                                 )
                             }
                         }
-                    } else {
+                    } else if (filteredPdfs.isNotEmpty()) {
                         items(
                             items = filteredPdfs,
                             key = { it.uriString }
@@ -516,6 +606,30 @@ fun HomeScreen(
                             )
                         }
                     }
+
+                    if (hasLibraryMatches) {
+                        item(span = { GridItemSpan(maxLineSpan) }) {
+                            InLibrarySearchHeader(count = librarySearchResults.size)
+                        }
+                        items(
+                            items = librarySearchResults,
+                            key = { "lib_search_${it.path ?: it.uri}" },
+                            span = { GridItemSpan(maxLineSpan) }
+                        ) { pdf ->
+                            val targetUri = remember(pdf.path, pdf.uri) {
+                                resolveLibrarySearchUri(pdf)
+                            }
+                            val recentThumb = remember(pdf.path, pdf.uri, recentPdfs) {
+                                findRecentThumbnailPath(pdf, recentPdfs)
+                            }
+                            HomeLibrarySearchRow(
+                                pdf = pdf,
+                                targetUri = targetUri,
+                                recentThumbnailPath = recentThumb,
+                                onClick = { onOpenPdfUri(targetUri) }
+                            )
+                        }
+                    }
                 }
             } else {
                 // ==================== LIST VIEW (with Enlarged Book Covers) ====================
@@ -529,6 +643,17 @@ fun HomeScreen(
                     ),
                     verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
+                    if (!isSearchActive) {
+                        item {
+                            LibraryFolderStrip(
+                                roots = libraryRoots,
+                                scanState = libraryScanState,
+                                onOpenRoot = { root -> onOpenLibraryFolder("${root.id}|") },
+                                onOpenSettings = onOpenLibrarySettings
+                            )
+                        }
+                    }
+
                     if (!hasFullStorageAccess && showStorageBanner) {
                         item {
                             StorageAccessBanner(
@@ -569,7 +694,9 @@ fun HomeScreen(
                         )
                     }
 
-                    if (recentPdfs.isEmpty()) {
+                    val hasLibraryMatches = isSearchActive && searchQuery.trim().length >= 2 && librarySearchResults.isNotEmpty()
+
+                    if (recentPdfs.isEmpty() && !hasLibraryMatches && (!isSearchActive || searchQuery.isBlank())) {
                         item {
                             EmptyRecentsView(
                                 onOpenSample = {
@@ -578,7 +705,7 @@ fun HomeScreen(
                                 isGeneratingSample = isGeneratingSample
                             )
                         }
-                    } else if (filteredPdfs.isEmpty()) {
+                    } else if (filteredPdfs.isEmpty() && !hasLibraryMatches) {
                         item {
                             if (searchQuery.isNotBlank()) {
                                 NoSearchResultsView(searchQuery = searchQuery)
@@ -589,7 +716,7 @@ fun HomeScreen(
                                 )
                             }
                         }
-                    } else {
+                    } else if (filteredPdfs.isNotEmpty()) {
                         items(
                             items = filteredPdfs,
                             key = { it.uriString }
@@ -603,6 +730,29 @@ fun HomeScreen(
                                 onClick = { onOpenItem(item) },
                                 onToggleFavorite = { viewModel.toggleFavorite(item) },
                                 onDelete = { viewModel.removeRecent(item.pdf_path) }
+                            )
+                        }
+                    }
+
+                    if (hasLibraryMatches) {
+                        item {
+                            InLibrarySearchHeader(count = librarySearchResults.size)
+                        }
+                        items(
+                            items = librarySearchResults,
+                            key = { "lib_search_${it.path ?: it.uri}" }
+                        ) { pdf ->
+                            val targetUri = remember(pdf.path, pdf.uri) {
+                                resolveLibrarySearchUri(pdf)
+                            }
+                            val recentThumb = remember(pdf.path, pdf.uri, recentPdfs) {
+                                findRecentThumbnailPath(pdf, recentPdfs)
+                            }
+                            HomeLibrarySearchRow(
+                                pdf = pdf,
+                                targetUri = targetUri,
+                                recentThumbnailPath = recentThumb,
+                                onClick = { onOpenPdfUri(targetUri) }
                             )
                         }
                     }
@@ -661,10 +811,13 @@ fun HomeScreen(
         }
     }
 
-    // Settings Bottom Sheet (Contains View Mode, AMOLED Dark and Themes, Accent Color, Guide, Clear)
+    // Settings Bottom Sheet (Contains View Mode, AMOLED Dark and Themes, Accent Color, Library Folders, Backup & Data, Guide, Clear)
     if (showSettingsSheet) {
         HomeSettingsSheet(
             currentSettings = appSettings,
+            storageUsedBytes = storageUsedBytes,
+            isBackupBusy = isBackupBusy,
+            onRefreshStorageUsed = { viewModel.refreshStorageUsed() },
             onSelectViewMode = { mode ->
                 viewModel.setRecentViewMode(mode)
             },
@@ -673,6 +826,32 @@ fun HomeScreen(
             },
             onSelectAccent = { accent ->
                 viewModel.setAppAccent(accent)
+            },
+            onOpenLibraryFolders = {
+                showSettingsSheet = false
+                onOpenLibrarySettings()
+            },
+            onExportBackup = {
+                showSettingsSheet = false
+                includeThumbnailsInBackup = true
+                showExportDialog = true
+            },
+            onImportBackup = {
+                showSettingsSheet = false
+                importBackupLauncher.launch(
+                    arrayOf(
+                        "application/zip",
+                        "application/x-zip-compressed",
+                        "application/octet-stream",
+                        "*/*"
+                    )
+                )
+            },
+            onClearLibThumbnailCache = {
+                viewModel.clearLibThumbnailCache()
+            },
+            onClearTocCache = {
+                viewModel.clearTocCache()
             },
             onOpenSample = {
                 showSettingsSheet = false
@@ -684,6 +863,99 @@ fun HomeScreen(
             },
             hasRecents = recentPdfs.isNotEmpty(),
             onDismiss = { showSettingsSheet = false }
+        )
+    }
+
+    // Export Backup Confirmation Dialog
+    if (showExportDialog) {
+        AlertDialog(
+            onDismissRequest = { showExportDialog = false },
+            title = { Text("Export Backup") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        text = "Save your recent documents, reading progress, bookmarks, settings, reading stats, and library folders to a portable ZIP archive.",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable { includeThumbnailsInBackup = !includeThumbnailsInBackup }
+                            .padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Checkbox(
+                            checked = includeThumbnailsInBackup,
+                            onCheckedChange = { includeThumbnailsInBackup = it }
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Include thumbnails",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showExportDialog = false
+                        exportBackupLauncher.launch(BackupManager.defaultBackupFileName())
+                    },
+                    modifier = Modifier.testTag("backup_export_confirm_btn")
+                ) {
+                    Text("Export")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showExportDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    // Backup Progress Dialog
+    if (isBackupBusy) {
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text("Backup in Progress") },
+            text = {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    CircularProgressIndicator(modifier = Modifier.size(28.dp))
+                    Text("Please wait…", style = MaterialTheme.typography.bodyMedium)
+                }
+            },
+            confirmButton = {}
+        )
+    }
+
+    // Backup Result / Error Dialog
+    if (backupResultTitle != null && backupResultMessage != null) {
+        AlertDialog(
+            onDismissRequest = {
+                backupResultTitle = null
+                backupResultMessage = null
+            },
+            title = { Text(backupResultTitle ?: "") },
+            text = { Text(backupResultMessage ?: "") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        backupResultTitle = null
+                        backupResultMessage = null
+                    },
+                    modifier = Modifier.testTag("backup_result_ok_btn")
+                ) {
+                    Text("OK")
+                }
+            }
         )
     }
 
@@ -976,7 +1248,7 @@ private fun LibraryFilterSortRow(
 }
 
 @Composable
-private fun PdfCoverThumbnail(
+internal fun PdfCoverThumbnail(
     item: PdfRecentItem,
     showTitleOnFallback: Boolean,
     iconSize: androidx.compose.ui.unit.Dp,
@@ -1365,15 +1637,27 @@ private fun RecentPdfCard(
 @Composable
 private fun HomeSettingsSheet(
     currentSettings: AppSettings,
+    storageUsedBytes: Long,
+    isBackupBusy: Boolean,
+    onRefreshStorageUsed: () -> Unit,
     onSelectViewMode: (RecentViewMode) -> Unit,
     onSelectTheme: (AppThemeMode) -> Unit,
     onSelectAccent: (AppAccent) -> Unit,
+    onOpenLibraryFolders: () -> Unit = {},
+    onExportBackup: () -> Unit = {},
+    onImportBackup: () -> Unit = {},
+    onClearLibThumbnailCache: () -> Unit = {},
+    onClearTocCache: () -> Unit = {},
     onOpenSample: () -> Unit,
     onClearRecents: () -> Unit,
     hasRecents: Boolean,
     onDismiss: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+    LaunchedEffect(Unit) {
+        onRefreshStorageUsed()
+    }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -1524,6 +1808,180 @@ private fun HomeSettingsSheet(
                 selectedAccent = currentSettings.appAccent,
                 onSelectAccent = onSelectAccent
             )
+
+            Spacer(modifier = Modifier.height(24.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // ==================== LIBRARY FOLDERS ====================
+            Text(
+                text = "LIBRARY FOLDERS",
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable(onClick = onOpenLibraryFolders),
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
+                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.FolderOpen,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(22.dp)
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Manage Library Folders",
+                            style = MaterialTheme.typography.bodyLarge,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Text(
+                            text = "Add, rescan, or remove local PDF folders",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Icon(
+                        imageVector = Icons.Default.ChevronRight,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // ==================== BACKUP & DATA ====================
+            Text(
+                text = "BACKUP & DATA",
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                FilledTonalButton(
+                    onClick = onExportBackup,
+                    enabled = !isBackupBusy,
+                    modifier = Modifier
+                        .weight(1f)
+                        .heightIn(min = 48.dp)
+                        .testTag("backup_export_btn"),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Icon(Icons.Default.SaveAlt, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Export Backup", fontSize = 13.sp)
+                }
+
+                FilledTonalButton(
+                    onClick = onImportBackup,
+                    enabled = !isBackupBusy,
+                    modifier = Modifier
+                        .weight(1f)
+                        .heightIn(min = 48.dp)
+                        .testTag("backup_import_btn"),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Icon(Icons.Default.Restore, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Import Backup", fontSize = 13.sp)
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.Storage,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Storage used",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                        Text(
+                            text = formatFileSize(storageUsedBytes),
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.testTag("backup_storage_used_text")
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = onClearLibThumbnailCache,
+                            modifier = Modifier
+                                .weight(1f)
+                                .heightIn(min = 48.dp)
+                                .testTag("clear_lib_thumbs_btn"),
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)
+                        ) {
+                            Text("Clear thumbnail cache", fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+
+                        OutlinedButton(
+                            onClick = onClearTocCache,
+                            modifier = Modifier
+                                .weight(1f)
+                                .heightIn(min = 48.dp)
+                                .testTag("clear_toc_cache_btn"),
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)
+                        ) {
+                            Text("Clear TOC cache", fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+                }
+            }
 
             Spacer(modifier = Modifier.height(24.dp))
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
@@ -1938,5 +2396,325 @@ private fun formatFileSize(bytes: Long): String {
         String.format(Locale.US, "%.1f MB", mb)
     } else {
         String.format(Locale.US, "%.0f KB", kb)
+    }
+}
+
+@Composable
+private fun LibraryFolderStrip(
+    roots: List<LibraryRoot>,
+    scanState: ScanState,
+    onOpenRoot: (LibraryRoot) -> Unit,
+    onOpenSettings: () -> Unit
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "Library",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+            TextButton(
+                onClick = onOpenSettings,
+                modifier = Modifier
+                    .heightIn(min = 48.dp)
+                    .testTag("library_manage_btn")
+            ) {
+                Text("Manage")
+            }
+        }
+
+        if (roots.isEmpty()) {
+            val outlineColor = MaterialTheme.colorScheme.outline
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 68.dp)
+                    .clip(RoundedCornerShape(14.dp))
+                    .drawBehind {
+                        drawRoundRect(
+                            color = outlineColor.copy(alpha = 0.7f),
+                            style = Stroke(
+                                width = 1.5.dp.toPx(),
+                                pathEffect = PathEffect.dashPathEffect(floatArrayOf(12f, 10f), 0f)
+                            ),
+                            cornerRadius = CornerRadius(14.dp.toPx(), 14.dp.toPx())
+                        )
+                    }
+                    .clickable(onClick = onOpenSettings)
+                    .padding(horizontal = 16.dp, vertical = 14.dp)
+                    .testTag("library_strip"),
+                contentAlignment = Alignment.Center
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.CreateNewFolder,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(22.dp)
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Text(
+                        text = "Add a folder to build your library",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            }
+        } else {
+            LazyRow(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("library_strip"),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                items(
+                    items = roots,
+                    key = { it.id }
+                ) { root ->
+                    val isScanning = scanState is ScanState.Scanning && scanState.rootName == root.name
+                    val needsAccess = root.status == LibraryRootStatus.NEEDS_ACCESS
+
+                    Card(
+                        modifier = Modifier
+                            .size(width = 150.dp, height = 88.dp)
+                            .clip(RoundedCornerShape(14.dp))
+                            .clickable { onOpenRoot(root) }
+                            .testTag("library_root_${root.id}"),
+                        shape = RoundedCornerShape(14.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
+                        )
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(12.dp),
+                            verticalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Folder,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                if (isScanning) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(14.dp),
+                                        strokeWidth = 2.dp
+                                    )
+                                } else if (needsAccess) {
+                                    Icon(
+                                        imageVector = Icons.Default.WarningAmber,
+                                        contentDescription = "Needs access",
+                                        tint = MaterialTheme.colorScheme.error,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
+
+                            Column {
+                                Text(
+                                    text = root.name,
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = "${root.pdfCount} PDFs",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+
+                item(key = "__add_folder__") {
+                    val outlineColor = MaterialTheme.colorScheme.outline
+                    Box(
+                        modifier = Modifier
+                            .size(width = 150.dp, height = 88.dp)
+                            .clip(RoundedCornerShape(14.dp))
+                            .drawBehind {
+                                drawRoundRect(
+                                    color = outlineColor.copy(alpha = 0.6f),
+                                    style = Stroke(
+                                        width = 1.5.dp.toPx(),
+                                        pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 8f), 0f)
+                                    ),
+                                    cornerRadius = CornerRadius(14.dp.toPx(), 14.dp.toPx())
+                                )
+                            }
+                            .clickable(onClick = onOpenSettings)
+                            .padding(12.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Icon(
+                                imageVector = Icons.Default.CreateNewFolder,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(22.dp)
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = "+ Add folder",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun resolveLibrarySearchUri(pdf: LibraryPdf): Uri {
+    val file = pdf.path?.let { File(it) }
+    return if (file != null && file.exists() && file.canRead()) {
+        Uri.fromFile(file)
+    } else {
+        Uri.parse(pdf.uri)
+    }
+}
+
+private fun findRecentThumbnailPath(pdf: LibraryPdf, recentPdfs: List<PdfRecentItem>): String? {
+    val absPath = pdf.path
+    val match = recentPdfs.firstOrNull { item ->
+        (!absPath.isNullOrBlank() && item.localFilePath?.equals(absPath, ignoreCase = true) == true) ||
+            item.uriString.equals(pdf.uri, ignoreCase = true)
+    }
+    return match?.thumbnailPath
+}
+
+@Composable
+private fun InLibrarySearchHeader(count: Int) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 12.dp, bottom = 4.dp)
+            .testTag("in_library_search_header"),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = "In your library",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold
+        )
+        Text(
+            text = "$count found",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+@Composable
+private fun HomeLibrarySearchRow(
+    pdf: LibraryPdf,
+    targetUri: Uri,
+    recentThumbnailPath: String?,
+    onClick: () -> Unit
+) {
+    val context = LocalContext.current
+    val docKey = remember(targetUri) { PdfDocumentStorage.getDocumentKey(targetUri) }
+    var thumbBitmap by remember(docKey, recentThumbnailPath) {
+        mutableStateOf<ImageBitmap?>(LibraryThumbnailStore.getCachedSync(docKey))
+    }
+
+    LaunchedEffect(docKey, recentThumbnailPath) {
+        if (thumbBitmap == null) {
+            thumbBitmap = LibraryThumbnailStore.loadOrGenerateThumbnail(
+                context = context,
+                uri = targetUri,
+                docKey = docKey,
+                recentThumbnailPath = recentThumbnailPath
+            )
+        }
+    }
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 48.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .clickable(onClick = onClick)
+            .testTag("home_library_search_item_${(pdf.path ?: pdf.uri).hashCode()}"),
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(width = 44.dp, height = 60.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+                    .border(0.5.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp)),
+                contentAlignment = Alignment.Center
+            ) {
+                val bmp = thumbBitmap
+                if (bmp != null) {
+                    Image(
+                        bitmap = bmp,
+                        contentDescription = "Cover of ${pdf.name}",
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop
+                    )
+                } else {
+                    Icon(
+                        imageVector = Icons.Default.PictureAsPdf,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.width(12.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = pdf.name,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                val folderLabel = pdf.relDir.ifBlank { "Library root" }
+                Text(
+                    text = if (pdf.size > 0L) "$folderLabel • ${formatFileSize(pdf.size)}" else folderLabel,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            Icon(
+                imageVector = Icons.Default.ChevronRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
     }
 }

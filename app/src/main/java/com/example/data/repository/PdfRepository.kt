@@ -42,12 +42,15 @@ class PdfRepository(
     private val context: Context = context.applicationContext
     private val tag = "PdfRepository"
 
-    private val _recentPdfsFlow = MutableStateFlow<List<PdfRecentItem>>(emptyList())
-    val recentPdfs: Flow<List<PdfRecentItem>> = _recentPdfsFlow.asStateFlow()
+    companion object {
+        private val sharedRecentPdfsFlow = MutableStateFlow<List<PdfRecentItem>>(emptyList())
+    }
+
+    val recentPdfs: Flow<List<PdfRecentItem>> = sharedRecentPdfsFlow.asStateFlow()
 
     fun reloadRecentsFromDirectory() {
         val items = PdfDirectoryStorage.loadAllDirectoriesAsRecentItems(context)
-        _recentPdfsFlow.value = items
+        sharedRecentPdfsFlow.value = items
         Log.d(tag, "reloadRecentsFromDirectory: Emitted ${items.size} recent PDFs from dedicated pdf_directories")
     }
 
@@ -671,5 +674,9 @@ class PdfRepository(
 
     suspend fun deleteBookmarkByPage(uriString: String, pageIndex: Int) = withContext(Dispatchers.IO) {
         pdfBookmarkDao.deleteBookmarkByPage(uriString, pageIndex)
+    }
+
+    suspend fun deleteAllBookmarksForUri(uriString: String) = withContext(Dispatchers.IO) {
+        pdfBookmarkDao.deleteAllBookmarksForUri(uriString)
     }
 }

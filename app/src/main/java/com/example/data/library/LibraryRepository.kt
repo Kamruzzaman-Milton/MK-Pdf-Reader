@@ -45,11 +45,19 @@ class LibraryRepository private constructor(context: Context) {
     private var nameSizeMap: HashMap<NameSizeKey, LibraryPdf> = HashMap()
 
     @Volatile
+    private var searchEntries: List<SearchEntry> = emptyList()
+
+    @Volatile
     private var isLoaded: Boolean = false
 
     private data class NameSizeKey(
         val nameLower: String,
         val size: Long
+    )
+
+    private data class SearchEntry(
+        val pdf: LibraryPdf,
+        val nameLower: String
     )
 
     companion object {
@@ -87,14 +95,15 @@ class LibraryRepository private constructor(context: Context) {
                 }
                 map
             }
-            val (builtTree, builtMap) = buildTreeAndLookup(loadedIndices)
+            val result = buildTreeAndLookup(loadedIndices)
             synchronized(syncLoadLock) {
                 if (!isLoaded) {
                     indicesByRoot.clear()
                     indicesByRoot.putAll(loadedIndices)
                     _roots.value = loadedRoots
-                    nameSizeMap = builtMap
-                    _tree.value = builtTree
+                    nameSizeMap = result.lookup
+                    searchEntries = result.searchList
+                    _tree.value = result.tree
                     isLoaded = true
                 }
             }
@@ -110,12 +119,13 @@ class LibraryRepository private constructor(context: Context) {
             for (root in loadedRoots) {
                 loadedIndices[root.id] = LibraryStorage.loadIndex(appContext, root.id)
             }
-            val (builtTree, builtMap) = buildTreeAndLookupSync(loadedIndices)
+            val result = buildTreeAndLookupSync(loadedIndices)
             indicesByRoot.clear()
             indicesByRoot.putAll(loadedIndices)
             _roots.value = loadedRoots
-            nameSizeMap = builtMap
-            _tree.value = builtTree
+            nameSizeMap = result.lookup
+            searchEntries = result.searchList
+            _tree.value = result.tree
             isLoaded = true
         }
     }
@@ -190,9 +200,10 @@ class LibraryRepository private constructor(context: Context) {
             }
             _roots.value = currentRoots
             if (toRemove.isNotEmpty()) {
-                val (builtTree, builtMap) = buildTreeAndLookup(indicesByRoot)
-                nameSizeMap = builtMap
-                _tree.value = builtTree
+                val result = buildTreeAndLookup(indicesByRoot)
+                nameSizeMap = result.lookup
+                searchEntries = result.searchList
+                _tree.value = result.tree
             }
             newRoot
         }
@@ -219,9 +230,84 @@ class LibraryRepository private constructor(context: Context) {
                 LibraryStorage.deleteIndex(appContext, id)
             }
             _roots.value = currentRoots
-            val (builtTree, builtMap) = buildTreeAndLookup(indicesByRoot)
-            nameSizeMap = builtMap
-            _tree.value = builtTree
+            val result = buildTreeAndLookup(indicesByRoot)
+            nameSizeMap = result.lookup
+            searchEntries = result.searchList
+            _tree.value = result.tree
+        }
+    }
+
+    suspend fun removeEntries(entries: Collection<LibraryPdf>) {
+        if (entries.isEmpty()) return
+        ensureLoaded()
+        val keysToRemove = HashSet<String>(entries.size * 2)
+        for (entry in entries) {
+            entry.path?.takeIf { it.isNotBlank() }?.let { keysToRemove.add(it) }
+            if (entry.uri.isNotBlank()) keysToRemove.add(entry.uri)
+        }
+        if (keysToRemove.isEmpty()) return
+
+        scanMutex.withLock {
+            var anyRootChanged = false
+            val updatedRoots = _roots.value.toMutableList()
+            for (i in updatedRoots.indices) {
+                val root = updatedRoots[i]
+                val list = indicesByRoot[root.id] ?: continue
+                val remaining = list.filter { pdf ->
+                    val matchPath = pdf.path != null && pdf.path in keysToRemove
+                    val matchUri = pdf.uri in keysToRemove
+                    !matchPath && !matchUri
+                }
+                if (remaining.size != list.size) {
+                    anyRootChanged = true
+                    indicesByRoot[root.id] = remaining
+                    updatedRoots[i] = root.copy(pdfCount = remaining.size)
+                    withContext(Dispatchers.IO) {
+                        LibraryStorage.saveIndex(appContext, root.id, remaining)
+                    }
+                }
+            }
+            if (anyRootChanged) {
+                withContext(Dispatchers.IO) {
+                    LibraryStorage.saveRoots(appContext, updatedRoots)
+                }
+                _roots.value = updatedRoots
+                val result = buildTreeAndLookup(indicesByRoot)
+                nameSizeMap = result.lookup
+                searchEntries = result.searchList
+                _tree.value = result.tree
+            }
+        }
+    }
+
+    suspend fun mergeImportedRoots(importedRoots: List<LibraryRoot>): Int {
+        if (importedRoots.isEmpty()) return 0
+        ensureLoaded()
+        return scanMutex.withLock {
+            val currentRoots = _roots.value.toMutableList()
+            val existingIds = currentRoots.mapTo(HashSet()) { it.id }
+            var addedCount = 0
+            for (imported in importedRoots) {
+                if (imported.id.isBlank()) continue
+                if (imported.id !in existingIds) {
+                    existingIds.add(imported.id)
+                    currentRoots.add(
+                        imported.copy(
+                            lastScanAt = 0L,
+                            pdfCount = 0
+                        )
+                    )
+                    indicesByRoot.putIfAbsent(imported.id, emptyList())
+                    addedCount++
+                }
+            }
+            if (addedCount > 0) {
+                withContext(Dispatchers.IO) {
+                    LibraryStorage.saveRoots(appContext, currentRoots)
+                }
+                _roots.value = currentRoots
+            }
+            addedCount
         }
     }
 
@@ -270,6 +356,22 @@ class LibraryRepository private constructor(context: Context) {
         return nameSizeMap[NameSizeKey(name.lowercase(Locale.ROOT), size)]
     }
 
+    fun searchByName(query: String, limit: Int = 20): List<LibraryPdf> {
+        ensureLoadedSync()
+        val q = query.trim().lowercase(Locale.ROOT)
+        if (q.length < 2 || limit <= 0) return emptyList()
+        val snapshot = searchEntries
+        if (snapshot.isEmpty()) return emptyList()
+        val matches = ArrayList<LibraryPdf>(limit.coerceAtMost(20))
+        for (entry in snapshot) {
+            if (entry.nameLower.contains(q)) {
+                matches.add(entry.pdf)
+                if (matches.size >= limit) break
+            }
+        }
+        return matches
+    }
+
     private suspend fun scanSingleRootLocked(root: LibraryRoot) {
         _scanState.value = ScanState.Scanning(root.name, 0)
         try {
@@ -294,9 +396,10 @@ class LibraryRepository private constructor(context: Context) {
                     }
                     _roots.value = updatedRoots
 
-                    val (builtTree, builtMap) = buildTreeAndLookup(indicesByRoot)
-                    nameSizeMap = builtMap
-                    _tree.value = builtTree
+                    val treeResult = buildTreeAndLookup(indicesByRoot)
+                    nameSizeMap = treeResult.lookup
+                    searchEntries = treeResult.searchList
+                    _tree.value = treeResult.tree
                 }
                 ScanResult.NeedsAccess -> {
                     val updatedRoot = root.copy(status = LibraryRootStatus.NEEDS_ACCESS)
@@ -314,9 +417,15 @@ class LibraryRepository private constructor(context: Context) {
         }
     }
 
+    private data class BuiltIndexData(
+        val tree: LibraryTree,
+        val lookup: HashMap<NameSizeKey, LibraryPdf>,
+        val searchList: List<SearchEntry>
+    )
+
     private suspend fun buildTreeAndLookup(
         indices: Map<String, List<LibraryPdf>>
-    ): Pair<LibraryTree, HashMap<NameSizeKey, LibraryPdf>> = withContext(Dispatchers.Default) {
+    ): BuiltIndexData = withContext(Dispatchers.Default) {
         val snapshot = HashMap<String, List<LibraryPdf>>(indices.size)
         for ((k, v) in indices) {
             snapshot[k] = v
@@ -326,9 +435,11 @@ class LibraryRepository private constructor(context: Context) {
 
     private fun buildTreeAndLookupSync(
         indices: Map<String, List<LibraryPdf>>
-    ): Pair<LibraryTree, HashMap<NameSizeKey, LibraryPdf>> {
+    ): BuiltIndexData {
         val nodes = HashMap<String, DirNode>()
         val lookup = HashMap<NameSizeKey, LibraryPdf>()
+        val searchList = ArrayList<SearchEntry>()
+        val seenSearchKeys = HashSet<String>()
 
         for ((rootId, pdfs) in indices) {
             if (pdfs.isEmpty()) continue
@@ -339,9 +450,14 @@ class LibraryRepository private constructor(context: Context) {
             val allDirs = LinkedHashSet<String>()
 
             for (pdf in pdfs) {
-                val key = NameSizeKey(pdf.name.lowercase(Locale.ROOT), pdf.size)
+                val nameLower = pdf.name.lowercase(Locale.ROOT)
+                val key = NameSizeKey(nameLower, pdf.size)
                 if (!lookup.containsKey(key)) {
                     lookup[key] = pdf
+                }
+                val searchKey = pdf.path ?: pdf.uri
+                if (seenSearchKeys.add(searchKey)) {
+                    searchList.add(SearchEntry(pdf = pdf, nameLower = nameLower))
                 }
 
                 val rel = pdf.relDir.trim('/')
@@ -378,7 +494,7 @@ class LibraryRepository private constructor(context: Context) {
             }
         }
 
-        return Pair(LibraryTree(nodes), lookup)
+        return BuiltIndexData(LibraryTree(nodes), lookup, searchList)
     }
 
     private fun takeTreePersistablePermission(treeUri: Uri) {

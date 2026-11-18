@@ -240,6 +240,18 @@ object PdfOutlineParser {
         }
     }
 
+    fun clearAllOutlineCaches(context: Context) {
+        inMemoryCache.clear()
+        diagnostics.clear()
+        try {
+            getCacheDir(context).listFiles()?.forEach { file ->
+                try { file.delete() } catch (_: Throwable) {}
+            }
+        } catch (e: Throwable) {
+            Log.w(TAG, "Error clearing outline caches: ${e.message}")
+        }
+    }
+
     /**
      * Extracts full Table of Contents / Outline hierarchy from a PDF document.
      * Cascade order: L1 -> L2 -> sample-guide -> RawPdfOutlineReader -> Pdfium (iterative, then recursive).

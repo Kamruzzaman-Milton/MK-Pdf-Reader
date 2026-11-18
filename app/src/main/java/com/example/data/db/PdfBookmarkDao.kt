@@ -10,6 +10,9 @@ import kotlinx.coroutines.flow.Flow
 @Dao
 interface PdfBookmarkDao {
 
+    @Query("SELECT * FROM pdf_bookmarks")
+    suspend fun getAll(): List<PdfBookmarkEntity>
+
     @Query("SELECT * FROM pdf_bookmarks WHERE uriString = :uriString ORDER BY pageIndex ASC")
     fun getBookmarksForUri(uriString: String): Flow<List<PdfBookmarkEntity>>
 

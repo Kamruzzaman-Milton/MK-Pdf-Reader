@@ -100,6 +100,15 @@ enum class LibraryFilter(val displayName: String) {
     FAVORITES("Favorites")
 }
 
+enum class BrowserSort(val displayName: String) {
+    NAME_ASC("Name (A–Z)"),
+    NAME_DESC("Name (Z–A)"),
+    DATE_NEW("Newest first"),
+    DATE_OLD("Oldest first"),
+    SIZE_LARGE("Largest first"),
+    SIZE_SMALL("Smallest first")
+}
+
 data class AppSettings(
     val sharpness: RenderSharpness = RenderSharpness.HIGH_CLARITY,
     val prefetchMode: PrefetchMode = PrefetchMode.AGGRESSIVE,
@@ -121,7 +130,10 @@ data class AppSettings(
     val appAccent: AppAccent = AppAccent.SCARLET,
     val librarySort: LibrarySort = LibrarySort.RECENT,
     val libraryFilter: LibraryFilter = LibraryFilter.ALL,
-    val favoriteKeys: Set<String> = emptySet()
+    val favoriteKeys: Set<String> = emptySet(),
+    val browserSort: BrowserSort = BrowserSort.NAME_ASC,
+    val browserFoldersFirst: Boolean = true,
+    val libraryAutoRescan: Boolean = true
 )
 
 class SettingsRepository(context: Context) {
@@ -152,6 +164,9 @@ class SettingsRepository(context: Context) {
         val librarySortName = prefs.getString(KEY_LIBRARY_SORT, LibrarySort.RECENT.name)
         val libraryFilterName = prefs.getString(KEY_LIBRARY_FILTER, LibraryFilter.ALL.name)
         val favoriteKeys = prefs.getStringSet(KEY_FAVORITE_KEYS, emptySet())?.toSet() ?: emptySet()
+        val browserSortName = prefs.getString(KEY_BROWSER_SORT, BrowserSort.NAME_ASC.name)
+        val browserFoldersFirst = prefs.getBoolean(KEY_BROWSER_FOLDERS_FIRST, true)
+        val libraryAutoRescan = prefs.getBoolean(KEY_LIBRARY_AUTO_RESCAN, true)
 
         return AppSettings(
             sharpness = parseEnum(sharpnessName, RenderSharpness.HIGH_CLARITY),
@@ -174,7 +189,10 @@ class SettingsRepository(context: Context) {
             appAccent = parseEnum(accentName, AppAccent.SCARLET),
             librarySort = parseEnum(librarySortName, LibrarySort.RECENT),
             libraryFilter = parseEnum(libraryFilterName, LibraryFilter.ALL),
-            favoriteKeys = favoriteKeys
+            favoriteKeys = favoriteKeys,
+            browserSort = parseEnum(browserSortName, BrowserSort.NAME_ASC),
+            browserFoldersFirst = browserFoldersFirst,
+            libraryAutoRescan = libraryAutoRescan
         )
     }
 
@@ -290,6 +308,41 @@ class SettingsRepository(context: Context) {
         _settings.value = _settings.value.copy(favoriteKeys = immutableCopy)
     }
 
+    fun addFavoriteKey(docKey: String) {
+        if (docKey in _settings.value.favoriteKeys) return
+        val updated = HashSet(_settings.value.favoriteKeys).apply { add(docKey) }
+        val immutableCopy = updated.toSet()
+        prefs.edit().putStringSet(KEY_FAVORITE_KEYS, HashSet(immutableCopy)).apply()
+        _settings.value = _settings.value.copy(favoriteKeys = immutableCopy)
+    }
+
+    fun removeFavoriteKey(docKey: String) {
+        if (docKey !in _settings.value.favoriteKeys) return
+        val updated = HashSet(_settings.value.favoriteKeys).apply { remove(docKey) }
+        val immutableCopy = updated.toSet()
+        prefs.edit().putStringSet(KEY_FAVORITE_KEYS, HashSet(immutableCopy)).apply()
+        _settings.value = _settings.value.copy(favoriteKeys = immutableCopy)
+    }
+
+    fun reloadFromPrefs() {
+        _settings.value = loadSettings()
+    }
+
+    fun updateBrowserSort(sort: BrowserSort) {
+        prefs.edit().putString(KEY_BROWSER_SORT, sort.name).apply()
+        _settings.value = _settings.value.copy(browserSort = sort)
+    }
+
+    fun updateBrowserFoldersFirst(foldersFirst: Boolean) {
+        prefs.edit().putBoolean(KEY_BROWSER_FOLDERS_FIRST, foldersFirst).apply()
+        _settings.value = _settings.value.copy(browserFoldersFirst = foldersFirst)
+    }
+
+    fun updateLibraryAutoRescan(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_LIBRARY_AUTO_RESCAN, enabled).apply()
+        _settings.value = _settings.value.copy(libraryAutoRescan = enabled)
+    }
+
     private inline fun <reified T : Enum<T>> parseEnum(name: String?, default: T): T {
         if (name == null) return default
         return try {
@@ -321,6 +374,9 @@ class SettingsRepository(context: Context) {
         private const val KEY_LIBRARY_SORT = "library_sort"
         private const val KEY_LIBRARY_FILTER = "library_filter"
         private const val KEY_FAVORITE_KEYS = "favorite_keys"
+        private const val KEY_BROWSER_SORT = "browser_sort"
+        private const val KEY_BROWSER_FOLDERS_FIRST = "browser_folders_first"
+        private const val KEY_LIBRARY_AUTO_RESCAN = "library_auto_rescan"
 
         @Volatile
         private var instance: SettingsRepository? = null

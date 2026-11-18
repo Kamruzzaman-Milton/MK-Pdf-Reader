@@ -20,6 +20,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -27,6 +28,9 @@ import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.ui.home.HomeScreen
 import com.example.ui.home.HomeViewModel
+import com.example.ui.library.LibraryBrowserScreen
+import com.example.ui.library.LibrarySettingsSheet
+import com.example.ui.library.LibraryViewModel
 import com.example.ui.reader.PdfReaderScreen
 import com.example.ui.reader.PdfReaderViewModel
 import com.example.ui.theme.MyApplicationTheme
@@ -69,6 +73,7 @@ class MainActivity : ComponentActivity() {
 
     private val homeViewModel: HomeViewModel by viewModels()
     private val readerViewModel: PdfReaderViewModel by viewModels()
+    private val libraryViewModel: LibraryViewModel by viewModels()
     private var isReaderVisible: Boolean = false
     private var pendingIntentUri by mutableStateOf<Uri?>(null)
 
@@ -93,6 +98,7 @@ class MainActivity : ComponentActivity() {
                 MainAppContent(
                     homeViewModel = homeViewModel,
                     readerViewModel = readerViewModel,
+                    libraryViewModel = libraryViewModel,
                     initialPdfUri = pendingIntentUri,
                     onIntentUriConsumed = { pendingIntentUri = null },
                     onKeepScreenAwakeChange = { keepAwake ->
@@ -170,6 +176,7 @@ class MainActivity : ComponentActivity() {
 fun MainAppContent(
     homeViewModel: HomeViewModel,
     readerViewModel: PdfReaderViewModel,
+    libraryViewModel: LibraryViewModel,
     initialPdfUri: Uri? = null,
     onIntentUriConsumed: () -> Unit = {},
     onKeepScreenAwakeChange: (Boolean) -> Unit = {},
@@ -180,8 +187,22 @@ fun MainAppContent(
     var currentPdfUriString by rememberSaveable {
         mutableStateOf<String?>(null)
     }
+    var libraryLocation by rememberSaveable {
+        mutableStateOf<String?>(null)
+    }
+    var showLibrarySettings by remember { mutableStateOf(false) }
 
     val readerState by readerViewModel.uiState.collectAsStateWithLifecycle()
+    val libraryRoots by libraryViewModel.roots.collectAsStateWithLifecycle()
+    val libraryScanState by libraryViewModel.scanState.collectAsStateWithLifecycle()
+    val libraryListing by libraryViewModel.listing.collectAsStateWithLifecycle()
+    val librarySettings by libraryViewModel.appSettings.collectAsStateWithLifecycle()
+    val selectedLibraryKeys by libraryViewModel.selectedKeys.collectAsStateWithLifecycle()
+    val recentPdfs by homeViewModel.recentPdfs.collectAsStateWithLifecycle()
+
+    LaunchedEffect(libraryLocation) {
+        libraryViewModel.setLocation(libraryLocation)
+    }
 
     LaunchedEffect(currentPdfUriString) {
         onReaderVisibilityChanged(currentPdfUriString != null)
@@ -200,6 +221,15 @@ fun MainAppContent(
         }
     }
 
+    val openPdfUri: (Uri) -> Unit = { uri ->
+        PdfDocumentStorage.takePersistablePermissionSafely(context, uri)
+        scope.launch {
+            val resolved = homeViewModel.resolveIdentityUri(uri)
+            currentPdfUriString = resolved.toString()
+            readerViewModel.loadPdf(resolved)
+        }
+    }
+
     // Load initial or new-intent PDF if provided via Intent
     LaunchedEffect(initialPdfUri) {
         if (initialPdfUri != null) {
@@ -215,12 +245,7 @@ fun MainAppContent(
         contract = OpenPdfDocumentContract()
     ) { uri: Uri? ->
         if (uri != null) {
-            PdfDocumentStorage.takePersistablePermissionSafely(context, uri)
-            scope.launch {
-                val resolved = homeViewModel.resolveIdentityUri(uri)
-                currentPdfUriString = resolved.toString()
-                readerViewModel.loadPdf(resolved)
-            }
+            openPdfUri(uri)
         }
     }
 
@@ -234,7 +259,17 @@ fun MainAppContent(
         onKeepScreenAwakeChange(false)
     }
 
-    // Ensure system back gesture when reading a PDF returns to Recent menu instead of exiting app
+    val navigateUpLibrary: () -> Unit = {
+        libraryLocation = libraryLocation?.let { navigateUpLibraryLocation(it) }
+        libraryViewModel.setLocation(libraryLocation)
+    }
+
+    // Ensure system back gesture when browsing library moves to parent folder or returns to Home
+    BackHandler(enabled = libraryLocation != null && currentPdfUriString == null) {
+        navigateUpLibrary()
+    }
+
+    // Ensure system back gesture when reading a PDF returns to previous screen (Browser or Home) instead of exiting app
     BackHandler(enabled = currentPdfUriString != null) {
         navigateBackToRecent()
     }
@@ -246,17 +281,41 @@ fun MainAppContent(
                 viewModel = readerViewModel,
                 onNavigateBack = navigateBackToRecent
             )
+        } else if (libraryLocation != null) {
+            LibraryBrowserScreen(
+                listing = libraryListing,
+                scanState = libraryScanState,
+                appSettings = librarySettings,
+                recents = recentPdfs,
+                selectedKeys = selectedLibraryKeys,
+                onNavigateLocation = { newLoc ->
+                    libraryLocation = newLoc
+                    libraryViewModel.setLocation(newLoc)
+                },
+                onNavigateUp = navigateUpLibrary,
+                onOpenPdf = openPdfUri,
+                onSelectSort = { sort -> libraryViewModel.setBrowserSort(sort) },
+                onToggleFoldersFirst = { foldersFirst -> libraryViewModel.setBrowserFoldersFirst(foldersFirst) },
+                onRescanRoot = { rootId -> libraryViewModel.rescan(rootId) },
+                onOpenLibrarySettings = { showLibrarySettings = true },
+                onToggleSelect = { pdf -> libraryViewModel.toggleSelection(pdf) },
+                onSelectAll = { pdfs -> libraryViewModel.selectAll(pdfs) },
+                onClearSelection = { libraryViewModel.clearSelection() },
+                onAddToRecents = { pdfs -> libraryViewModel.addToRecents(pdfs) },
+                onToggleFavorite = { pdf, matchedRecentUri ->
+                    libraryViewModel.toggleFavorite(pdf, matchedRecentUri)
+                },
+                onFavoriteSelected = { pdfs, matchedUrisByKey ->
+                    libraryViewModel.favoriteSelected(pdfs, matchedUrisByKey)
+                },
+                onDeletePdfs = { pdfs, onComplete ->
+                    libraryViewModel.deletePdfs(pdfs, onComplete)
+                }
+            )
         } else {
             HomeScreen(
                 viewModel = homeViewModel,
-                onOpenPdfUri = { uri ->
-                    PdfDocumentStorage.takePersistablePermissionSafely(context, uri)
-                    scope.launch {
-                        val resolved = homeViewModel.resolveIdentityUri(uri)
-                        currentPdfUriString = resolved.toString()
-                        readerViewModel.loadPdf(resolved)
-                    }
-                },
+                onOpenPdfUri = openPdfUri,
                 onLaunchFilePicker = {
                     try {
                         filePickerLauncher.launch(
@@ -275,8 +334,49 @@ fun MainAppContent(
                             context.startActivity(Intent.createChooser(fallbackIntent, "Select PDF"))
                         } catch (ignored: Exception) {}
                     }
-                }
+                },
+                libraryRoots = libraryRoots,
+                libraryScanState = libraryScanState,
+                onOpenLibraryFolder = { loc ->
+                    libraryLocation = loc
+                    libraryViewModel.setLocation(loc)
+                },
+                onOpenLibrarySettings = { showLibrarySettings = true }
             )
         }
+    }
+
+    if (showLibrarySettings) {
+        LibrarySettingsSheet(
+            roots = libraryRoots,
+            scanState = libraryScanState,
+            autoRescanEnabled = librarySettings.libraryAutoRescan,
+            onAddRoot = { treeUri -> libraryViewModel.addRoot(treeUri) },
+            onRescanRoot = { id -> libraryViewModel.rescan(id) },
+            onRescanAll = { libraryViewModel.rescan(null) },
+            onRemoveRoot = { id ->
+                if (libraryLocation?.startsWith("$id|") == true) {
+                    libraryLocation = null
+                    libraryViewModel.setLocation(null)
+                }
+                libraryViewModel.removeRoot(id)
+            },
+            onToggleAutoRescan = { enabled -> libraryViewModel.setLibraryAutoRescan(enabled) },
+            onDismiss = { showLibrarySettings = false }
+        )
+    }
+}
+
+private fun navigateUpLibraryLocation(location: String): String? {
+    val pipeIdx = location.indexOf('|')
+    if (pipeIdx < 0) return null
+    val rootId = location.substring(0, pipeIdx)
+    val relDir = location.substring(pipeIdx + 1).trim('/')
+    if (relDir.isEmpty()) return null
+    val slashIdx = relDir.lastIndexOf('/')
+    return if (slashIdx >= 0) {
+        "$rootId|${relDir.substring(0, slashIdx)}"
+    } else {
+        "$rootId|"
     }
 }

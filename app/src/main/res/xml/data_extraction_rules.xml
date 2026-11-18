@@ -1,19 +1,27 @@
-<?xml version="1.0" encoding="utf-8"?><!--
-   Sample data extraction rules file; uncomment and customize as necessary.
-   See https://developer.android.com/about/versions/12/backup-restore#xml-changes
-   for details.
--->
+<?xml version="1.0" encoding="utf-8"?>
 <data-extraction-rules>
     <cloud-backup>
-        <!-- TODO: Use <include> and <exclude> to control what is backed up.
-        <include .../>
-        <exclude .../>
-        -->
+        <include domain="file" path="pdf_directories" />
+        <include domain="file" path="library/roots.json" />
+        <include domain="file" path="thumbs" />
+        <include domain="file" path="recent_books.json" />
+        <include domain="sharedpref" path="mk_pdf_settings.xml" />
+        <include domain="sharedpref" path="mk_pdf_stats.xml" />
+        <include domain="database" path="mk_pdf_reader.db" />
+
+        <exclude domain="file" path="toc_cache" />
+        <exclude domain="file" path="lib_thumbs" />
     </cloud-backup>
-    <!--
     <device-transfer>
-        <include .../>
-        <exclude .../>
+        <include domain="file" path="pdf_directories" />
+        <include domain="file" path="library/roots.json" />
+        <include domain="file" path="thumbs" />
+        <include domain="file" path="recent_books.json" />
+        <include domain="sharedpref" path="mk_pdf_settings.xml" />
+        <include domain="sharedpref" path="mk_pdf_stats.xml" />
+        <include domain="database" path="mk_pdf_reader.db" />
+
+        <exclude domain="file" path="toc_cache" />
+        <exclude domain="file" path="lib_thumbs" />
     </device-transfer>
-    -->
 </data-extraction-rules>
