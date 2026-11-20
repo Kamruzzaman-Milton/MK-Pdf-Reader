@@ -22,10 +22,11 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.animateScrollBy
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.gestures.scrollBy
-import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -60,6 +61,7 @@ import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.NightsStay
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.RestartAlt
@@ -79,6 +81,7 @@ import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
@@ -104,6 +107,7 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -125,8 +129,11 @@ import com.example.data.settings.PageColorTone
 import com.example.data.settings.ReaderOrientation
 import com.example.data.settings.ReadingStats
 import com.example.ui.components.PdfPageView
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 fun Context.findActivity(): Activity? {
@@ -168,7 +175,7 @@ fun PdfReaderScreen(
         lp.screenBrightness = if (uiState.brightnessLevel < 0f) {
             WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
         } else {
-            uiState.brightnessLevel.coerceIn(0.05f, 1.0f)
+            uiState.brightnessLevel.coerceIn(0.01f, 1.0f)
         }
         activity.window.attributes = lp
     }
@@ -534,7 +541,7 @@ fun PdfReaderScreen(
 
                             IconButton(
                                 onClick = { viewModel.updateAutoScrollSpeed(appSettings.autoScrollSpeed + 1) },
-                                enabled = appSettings.autoScrollSpeed < 10,
+                                enabled = appSettings.autoScrollSpeed < 20,
                                 modifier = Modifier.testTag("auto_scroll_faster_btn")
                             ) {
                                 Icon(
@@ -574,6 +581,7 @@ fun PdfReaderScreen(
                         isBookmarked = uiState.isCurrentPageBookmarked,
                         bookmarkCount = uiState.bookmarks.size,
                         brightnessLevel = uiState.brightnessLevel,
+                        extraDimLevel = uiState.extraDimLevel,
                         onPageSeek = { targetPage1Indexed ->
                             viewModel.jumpToPage(targetPage1Indexed)
                         },
@@ -586,7 +594,8 @@ fun PdfReaderScreen(
                         onToggleBookmark = { viewModel.toggleBookmarkCurrentPage() },
                         onOpenBookmarksList = { viewModel.showBookmarksSheet(true) },
                         onOpenIndex = { viewModel.showIndexSheet(true) },
-                        onBrightnessChange = { viewModel.setBrightness(it) }
+                        onBrightnessChange = { viewModel.setBrightness(it) },
+                        onExtraDimChange = { viewModel.setExtraDim(it) }
                     )
                 }
             }
@@ -663,12 +672,115 @@ private fun ReaderViewport(
 
     val currentTapZoneNav by rememberUpdatedState(settings.tapZoneNavigation)
     val currentAutoScrollSpeed by rememberUpdatedState(settings.autoScrollSpeed)
-    val currentIsAutoScrolling by rememberUpdatedState(uiState.isAutoScrolling)
+    val currentBrightness by rememberUpdatedState(uiState.brightnessLevel)
+    val currentExtraDim by rememberUpdatedState(uiState.extraDimLevel)
     val density = LocalDensity.current
+    val context = LocalContext.current
+    val edgeWidthPx = with(density) { 44.dp.toPx() }
+
+    var isEdgeDraggingBrightness by remember { mutableStateOf(false) }
+    var showEdgeBrightnessHud by remember { mutableStateOf(false) }
+
+    LaunchedEffect(isEdgeDraggingBrightness) {
+        if (isEdgeDraggingBrightness) {
+            showEdgeBrightnessHud = true
+        } else if (showEdgeBrightnessHud) {
+            delay(1100)
+            showEdgeBrightnessHud = false
+        }
+    }
 
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
+            .pointerInput(edgeWidthPx) {
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                    if (down.position.x > edgeWidthPx) return@awaitEachGesture
+
+                    val touchSlop = viewConfiguration.touchSlop
+                    val viewportHeight = size.height.toFloat().coerceAtLeast(1f)
+                    var dragStarted = false
+                    var lastY = down.position.y
+                    var curB = if (currentBrightness < 0f) {
+                        try {
+                            val sysVal = Settings.System.getInt(
+                                context.contentResolver,
+                                Settings.System.SCREEN_BRIGHTNESS,
+                                128
+                            )
+                            (sysVal / 255f).coerceIn(0.01f, 1.0f)
+                        } catch (_: Exception) {
+                            0.5f
+                        }
+                    } else {
+                        currentBrightness.coerceIn(0.01f, 1.0f)
+                    }
+                    var curD = currentExtraDim.coerceIn(0f, 0.80f)
+
+                    try {
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            if (event.changes.count { it.pressed } > 1) {
+                                break
+                            }
+                            val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                            if (!change.pressed) {
+                                break
+                            }
+                            if (!dragStarted) {
+                                val dx = change.position.x - down.position.x
+                                val dy = change.position.y - down.position.y
+                                if (abs(dx) > touchSlop && abs(dx) >= abs(dy)) {
+                                    break
+                                }
+                                if (abs(dy) > touchSlop && abs(dy) > abs(dx) * 1.2f) {
+                                    dragStarted = true
+                                    isEdgeDraggingBrightness = true
+                                    lastY = change.position.y
+                                    change.consume()
+                                }
+                            } else {
+                                val deltaY = change.position.y - lastY
+                                lastY = change.position.y
+                                change.consume()
+
+                                val sensitivitySpan = (viewportHeight * 0.50f).coerceAtLeast(220f)
+                                val deltaUnified = -deltaY / sensitivitySpan
+                                if (deltaUnified > 0f) {
+                                    if (curD > 0f) {
+                                        val reduce = minOf(curD, deltaUnified)
+                                        curD = (curD - reduce).coerceAtLeast(0f)
+                                        val rem = deltaUnified - reduce
+                                        if (rem > 0f) {
+                                            curB = (curB + rem).coerceIn(0.01f, 1.0f)
+                                        }
+                                    } else {
+                                        curB = (curB + deltaUnified).coerceIn(0.01f, 1.0f)
+                                    }
+                                } else if (deltaUnified < 0f) {
+                                    val dimAmount = -deltaUnified
+                                    if (curB > 0.01f) {
+                                        val reduce = minOf(curB - 0.01f, dimAmount)
+                                        curB = (curB - reduce).coerceAtLeast(0.01f)
+                                        val rem = dimAmount - reduce
+                                        if (rem > 0f) {
+                                            curD = (curD + rem).coerceIn(0f, 0.80f)
+                                        }
+                                    } else {
+                                        curD = (curD + dimAmount).coerceIn(0f, 0.80f)
+                                    }
+                                }
+                                viewModel.setUnifiedBrightness(curB, curD)
+                            }
+                        }
+                    } finally {
+                        if (dragStarted) {
+                            isEdgeDraggingBrightness = false
+                        }
+                    }
+                }
+            }
             .pointerInput(Unit) {
                 detectTapGestures(
                     onDoubleTap = { offset ->
@@ -740,33 +852,36 @@ private fun ReaderViewport(
                     }
                 }
 
-                LaunchedEffect(listState) {
-                    listState.interactionSource.interactions.collect { interaction ->
-                        if (interaction is DragInteraction.Start && currentIsAutoScrolling) {
-                            viewModel.setAutoScrolling(false)
-                        }
-                    }
-                }
-
                 LaunchedEffect(uiState.isAutoScrolling, listState) {
                     if (!uiState.isAutoScrolling) return@LaunchedEffect
                     var lastFrameNanos = 0L
                     var lastActivityPingNanos = 0L
                     while (isActive) {
                         val frameNanos = withFrameNanos { it }
-                        if (lastFrameNanos != 0L) {
-                            val dt = (frameNanos - lastFrameNanos).coerceIn(0L, 100_000_000L)
-                            val pxPerSec = with(density) { currentAutoScrollSpeed * 6.dp.toPx() }
-                            val deltaPx = pxPerSec * dt / 1_000_000_000f
-                            if (deltaPx > 0f) {
-                                val consumed = listState.scrollBy(deltaPx)
-                                if (consumed == 0f && !listState.canScrollForward) {
-                                    viewModel.setAutoScrolling(false)
-                                    break
+                        if (listState.isScrollInProgress) {
+                            // Pause advancing while user manually scrolls/flings, then resume seamlessly
+                            lastFrameNanos = 0L
+                        } else {
+                            if (lastFrameNanos != 0L) {
+                                val dt = (frameNanos - lastFrameNanos).coerceIn(0L, 100_000_000L)
+                                val pxPerSec = with(density) { currentAutoScrollSpeed * 3.5f.dp.toPx() }
+                                val deltaPx = pxPerSec * dt / 1_000_000_000f
+                                if (deltaPx > 0f) {
+                                    val consumed = try {
+                                        listState.scrollBy(deltaPx)
+                                    } catch (e: CancellationException) {
+                                        if (!currentCoroutineContext().isActive) throw e
+                                        lastFrameNanos = 0L
+                                        continue
+                                    }
+                                    if (consumed == 0f && !listState.canScrollForward) {
+                                        viewModel.setAutoScrolling(false)
+                                        break
+                                    }
                                 }
                             }
+                            lastFrameNanos = frameNanos
                         }
-                        lastFrameNanos = frameNanos
                         if (lastActivityPingNanos == 0L || frameNanos - lastActivityPingNanos >= 1_000_000_000L) {
                             lastActivityPingNanos = frameNanos
                             viewModel.recordUserActivity()
@@ -889,6 +1004,86 @@ private fun ReaderViewport(
                         )
                     }
             )
+        }
+
+        if (uiState.extraDimLevel > 0f) {
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .drawBehind {
+                        drawRect(
+                            color = Color.Black,
+                            alpha = uiState.extraDimLevel.coerceIn(0f, 0.80f)
+                        )
+                    }
+            )
+        }
+
+        AnimatedVisibility(
+            visible = showEdgeBrightnessHud,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier
+                .align(Alignment.Center)
+                .padding(24.dp)
+        ) {
+            val inExtraDim = uiState.extraDimLevel > 0f
+            val pctText = if (inExtraDim) {
+                "Extra Dim ${(uiState.extraDimLevel * 100).roundToInt()}%"
+            } else {
+                val b = if (uiState.brightnessLevel < 0f) 0.5f else uiState.brightnessLevel
+                "Brightness ${(b * 100).roundToInt()}%"
+            }
+            val barFraction = if (inExtraDim) {
+                (uiState.extraDimLevel / 0.80f).coerceIn(0f, 1f)
+            } else {
+                (if (uiState.brightnessLevel < 0f) 0.5f else uiState.brightnessLevel).coerceIn(0f, 1f)
+            }
+            Surface(
+                shape = RoundedCornerShape(18.dp),
+                color = MaterialTheme.colorScheme.inverseSurface.copy(alpha = 0.90f),
+                shadowElevation = 6.dp,
+                modifier = Modifier.testTag("edge_brightness_hud")
+            ) {
+                Column(
+                    modifier = Modifier
+                        .width(184.dp)
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = when {
+                                inExtraDim -> Icons.Default.NightsStay
+                                uiState.brightnessLevel in 0f..0.39f -> Icons.Default.BrightnessLow
+                                else -> Icons.Default.WbSunny
+                            },
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.inverseOnSurface,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Text(
+                            text = pctText,
+                            color = MaterialTheme.colorScheme.inverseOnSurface,
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                    LinearProgressIndicator(
+                        progress = { barFraction },
+                        color = MaterialTheme.colorScheme.primary,
+                        trackColor = MaterialTheme.colorScheme.inverseOnSurface.copy(alpha = 0.25f),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(5.dp)
+                            .clip(RoundedCornerShape(3.dp))
+                    )
+                }
+            }
         }
     }
 }
@@ -1059,6 +1254,7 @@ private fun ReaderBottomBar(
     isBookmarked: Boolean,
     bookmarkCount: Int,
     brightnessLevel: Float,
+    extraDimLevel: Float,
     onPageSeek: (Int) -> Unit,
     onOpenJumpDialog: () -> Unit,
     onToggleReadingMode: () -> Unit,
@@ -1066,7 +1262,8 @@ private fun ReaderBottomBar(
     onToggleBookmark: () -> Unit,
     onOpenBookmarksList: () -> Unit,
     onOpenIndex: () -> Unit,
-    onBrightnessChange: (Float) -> Unit
+    onBrightnessChange: (Float) -> Unit,
+    onExtraDimChange: (Float) -> Unit
 ) {
     var sliderValue by remember(currentPage) { mutableFloatStateOf(currentPage.toFloat()) }
     var isDraggingSlider by remember { mutableStateOf(false) }
@@ -1143,61 +1340,122 @@ private fun ReaderBottomBar(
                     shape = RoundedCornerShape(12.dp),
                     color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
                 ) {
-                    Row(
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 10.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
                     ) {
-                        Icon(
-                            imageVector = if (brightnessLevel < 0f) Icons.Default.BrightnessMedium else if (brightnessLevel < 0.4f) Icons.Default.BrightnessLow else Icons.Default.WbSunny,
-                            contentDescription = "Screen Brightness",
-                            tint = if (brightnessLevel >= 0f) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(18.dp)
-                        )
-
-                        Spacer(modifier = Modifier.width(8.dp))
-
-                        Slider(
-                            value = if (brightnessLevel < 0f) 0.5f else brightnessLevel,
-                            onValueChange = { onBrightnessChange(it) },
-                            valueRange = 0.05f..1.0f,
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(28.dp)
-                                .testTag("brightness_slider"),
-                            colors = SliderDefaults.colors(
-                                thumbColor = if (brightnessLevel >= 0f) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
-                                activeTrackColor = if (brightnessLevel >= 0f) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
-                            )
-                        )
-
-                        Spacer(modifier = Modifier.width(8.dp))
-
-                        // Auto / Percent badge button
-                        Surface(
-                            onClick = {
-                                if (brightnessLevel < 0f) {
-                                    onBrightnessChange(0.70f)
-                                } else {
-                                    onBrightnessChange(-1.0f) // Reset to Auto/System
-                                }
-                            },
-                            shape = RoundedCornerShape(8.dp),
-                            color = if (brightnessLevel < 0f) {
-                                MaterialTheme.colorScheme.secondaryContainer
-                            } else {
-                                MaterialTheme.colorScheme.primaryContainer
-                            },
-                            modifier = Modifier.testTag("brightness_auto_toggle")
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(
-                                text = if (brightnessLevel < 0f) "Auto" else "${(brightnessLevel * 100).roundToInt()}%",
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.SemiBold,
-                                color = if (brightnessLevel < 0f) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onPrimaryContainer,
-                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+                            Icon(
+                                imageVector = if (brightnessLevel < 0f) Icons.Default.BrightnessMedium else if (brightnessLevel < 0.4f) Icons.Default.BrightnessLow else Icons.Default.WbSunny,
+                                contentDescription = "Screen Brightness",
+                                tint = if (brightnessLevel >= 0f) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp)
                             )
+
+                            Spacer(modifier = Modifier.width(8.dp))
+
+                            Slider(
+                                value = if (brightnessLevel < 0f) 0.5f else brightnessLevel,
+                                onValueChange = { onBrightnessChange(it) },
+                                valueRange = 0.01f..1.0f,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(28.dp)
+                                    .testTag("brightness_slider"),
+                                colors = SliderDefaults.colors(
+                                    thumbColor = if (brightnessLevel >= 0f) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+                                    activeTrackColor = if (brightnessLevel >= 0f) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
+                                )
+                            )
+
+                            Spacer(modifier = Modifier.width(8.dp))
+
+                            // Auto / Percent badge button
+                            Surface(
+                                onClick = {
+                                    if (brightnessLevel < 0f) {
+                                        onBrightnessChange(0.70f)
+                                    } else {
+                                        onBrightnessChange(-1.0f) // Reset to Auto/System
+                                    }
+                                },
+                                shape = RoundedCornerShape(8.dp),
+                                color = if (brightnessLevel < 0f) {
+                                    MaterialTheme.colorScheme.secondaryContainer
+                                } else {
+                                    MaterialTheme.colorScheme.primaryContainer
+                                },
+                                modifier = Modifier.testTag("brightness_auto_toggle")
+                            ) {
+                                Text(
+                                    text = if (brightnessLevel < 0f) "Auto" else "${(brightnessLevel * 100).roundToInt()}%",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = if (brightnessLevel < 0f) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onPrimaryContainer,
+                                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+                                )
+                            }
+                        }
+
+                        // Extra Dim Row for very dark rooms
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.NightsStay,
+                                contentDescription = "Extra Dim",
+                                tint = if (extraDimLevel > 0f) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp)
+                            )
+
+                            Spacer(modifier = Modifier.width(8.dp))
+
+                            Slider(
+                                value = extraDimLevel,
+                                onValueChange = { onExtraDimChange(it) },
+                                valueRange = 0f..0.80f,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(28.dp)
+                                    .testTag("extra_dim_slider"),
+                                colors = SliderDefaults.colors(
+                                    thumbColor = if (extraDimLevel > 0f) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+                                    activeTrackColor = if (extraDimLevel > 0f) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
+                                )
+                            )
+
+                            Spacer(modifier = Modifier.width(8.dp))
+
+                            Surface(
+                                onClick = {
+                                    if (extraDimLevel > 0f) {
+                                        onExtraDimChange(0f)
+                                    } else {
+                                        onExtraDimChange(0.50f)
+                                    }
+                                },
+                                shape = RoundedCornerShape(8.dp),
+                                color = if (extraDimLevel <= 0f) {
+                                    MaterialTheme.colorScheme.secondaryContainer
+                                } else {
+                                    MaterialTheme.colorScheme.primaryContainer
+                                },
+                                modifier = Modifier.testTag("extra_dim_toggle")
+                            ) {
+                                Text(
+                                    text = if (extraDimLevel <= 0f) "Extra Dim" else "Dim ${(extraDimLevel * 100).roundToInt()}%",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = if (extraDimLevel <= 0f) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onPrimaryContainer,
+                                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+                                )
+                            }
                         }
                     }
                 }
@@ -1340,7 +1598,7 @@ private fun ReaderBottomBar(
                 FilledTonalIconButton(
                     onClick = { showBrightnessBar = !showBrightnessBar },
                     shape = RoundedCornerShape(12.dp),
-                    colors = if (showBrightnessBar || brightnessLevel >= 0f) {
+                    colors = if (showBrightnessBar || brightnessLevel >= 0f || extraDimLevel > 0f) {
                         IconButtonDefaults.filledTonalIconButtonColors(
                             containerColor = MaterialTheme.colorScheme.primaryContainer,
                             contentColor = MaterialTheme.colorScheme.onPrimaryContainer
@@ -1351,7 +1609,9 @@ private fun ReaderBottomBar(
                     modifier = Modifier.testTag("bottom_brightness_btn")
                 ) {
                     Icon(
-                        imageVector = if (brightnessLevel < 0f) {
+                        imageVector = if (extraDimLevel > 0f) {
+                            Icons.Default.NightsStay
+                        } else if (brightnessLevel < 0f) {
                             Icons.Default.BrightnessMedium
                         } else if (brightnessLevel < 0.4f) {
                             Icons.Default.BrightnessLow

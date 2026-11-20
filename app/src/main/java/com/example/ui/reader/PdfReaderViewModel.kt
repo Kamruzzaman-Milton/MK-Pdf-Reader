@@ -77,7 +77,8 @@ data class PdfReaderUiState(
     val indexExpandedStates: Map<String, Boolean> = emptyMap(),
     val indexScrollIndex: Int = -1,
     val indexScrollOffset: Int = 0,
-    val brightnessLevel: Float = -1f, // -1f = auto/system default, 0.05f..1.0f = custom
+    val brightnessLevel: Float = -1f, // -1f = auto/system default, 0.01f..1.0f = custom
+    val extraDimLevel: Float = 0f, // 0f = off, 0.01f..0.80f = dark room extra dim scrim
     val hudFeedbackMessage: String? = null
 )
 
@@ -565,8 +566,26 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun setBrightness(brightness: Float) {
-        val clamped = if (brightness < 0f) -1f else brightness.coerceIn(0.05f, 1.0f)
+        val clamped = if (brightness < 0f) -1f else brightness.coerceIn(0.01f, 1.0f)
         _uiState.update { it.copy(brightnessLevel = clamped) }
+        recordUserActivity()
+    }
+
+    fun setExtraDim(level: Float) {
+        val clamped = if (level <= 0.005f) 0f else level.coerceIn(0.01f, 0.80f)
+        _uiState.update { it.copy(extraDimLevel = clamped) }
+        recordUserActivity()
+    }
+
+    fun setUnifiedBrightness(brightness: Float, extraDim: Float) {
+        val clampedBrightness = if (brightness < 0f) -1f else brightness.coerceIn(0.01f, 1.0f)
+        val clampedExtraDim = if (extraDim <= 0.005f) 0f else extraDim.coerceIn(0.01f, 0.80f)
+        _uiState.update {
+            it.copy(
+                brightnessLevel = clampedBrightness,
+                extraDimLevel = clampedExtraDim
+            )
+        }
         recordUserActivity()
     }
 
@@ -840,7 +859,13 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
         PdfOutlineParser.activeDocumentUri = null
         readingTickerJob?.cancel()
         readingTickerJob = null
-        _uiState.update { it.copy(isAutoScrolling = false) }
+        _uiState.update {
+            it.copy(
+                isAutoScrolling = false,
+                brightnessLevel = -1f,
+                extraDimLevel = 0f
+            )
+        }
         try {
             val doc = _uiState.value.documentInfo ?: return
             repository.recordDocumentResumed(

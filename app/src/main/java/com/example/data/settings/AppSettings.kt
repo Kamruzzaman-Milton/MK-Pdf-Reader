@@ -159,7 +159,7 @@ class SettingsRepository(context: Context) {
         val warmFilterPercent = prefs.getInt(KEY_WARM_FILTER_PERCENT, 0).coerceIn(0, 60)
         val tapZoneNav = prefs.getBoolean(KEY_TAP_ZONE_NAV, false)
         val volumeKeyNav = prefs.getBoolean(KEY_VOLUME_KEY_NAV, false)
-        val autoScrollSpeed = prefs.getInt(KEY_AUTO_SCROLL_SPEED, 3).coerceIn(1, 10)
+        val autoScrollSpeed = prefs.getInt(KEY_AUTO_SCROLL_SPEED, 3).coerceIn(1, 20)
         val accentName = prefs.getString(KEY_APP_ACCENT, AppAccent.SCARLET.name)
         val librarySortName = prefs.getString(KEY_LIBRARY_SORT, LibrarySort.RECENT.name)
         val libraryFilterName = prefs.getString(KEY_LIBRARY_FILTER, LibraryFilter.ALL.name)
@@ -278,7 +278,7 @@ class SettingsRepository(context: Context) {
     }
 
     fun updateAutoScrollSpeed(speed: Int) {
-        val clamped = speed.coerceIn(1, 10)
+        val clamped = speed.coerceIn(1, 20)
         prefs.edit().putInt(KEY_AUTO_SCROLL_SPEED, clamped).apply()
         _settings.value = _settings.value.copy(autoScrollSpeed = clamped)
     }
