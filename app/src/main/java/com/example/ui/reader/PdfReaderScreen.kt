@@ -9,6 +9,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.content.res.Resources
 import android.provider.Settings
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
@@ -143,6 +144,70 @@ fun Context.findActivity(): Activity? {
         ctx = ctx.baseContext
     }
     return null
+}
+
+/**
+ * Resolves the device's current system screen brightness normalized to [0.01f, 1.0f].
+ * Supports both Android 11+ canonical float brightness (`screen_brightness_float`) and
+ * OEM extended integer scales (e.g. 0..1023, 0..2047, 0..4095) rather than assuming 0..255.
+ */
+internal fun resolveCurrentSystemBrightness(context: Context): Float {
+    val cr = context.contentResolver
+    val sysInt = try {
+        Settings.System.getInt(cr, Settings.System.SCREEN_BRIGHTNESS, -1)
+    } catch (_: Exception) {
+        -1
+    }
+
+    var minInt = 0
+    var maxInt = 255
+    try {
+        val sysRes = Resources.getSystem()
+        val maxId = sysRes.getIdentifier("config_screenBrightnessSettingMaximum", "integer", "android")
+        if (maxId != 0) {
+            val resMax = sysRes.getInteger(maxId)
+            if (resMax > 0) maxInt = resMax
+        }
+        val minId = sysRes.getIdentifier("config_screenBrightnessSettingMinimum", "integer", "android")
+        if (minId != 0) {
+            val resMin = sysRes.getInteger(minId)
+            if (resMin in 0 until maxInt) minInt = resMin
+        }
+    } catch (_: Exception) {
+    }
+
+    val intNormalized: Float? = if (sysInt >= 0) {
+        if (sysInt > maxInt) {
+            maxInt = when {
+                sysInt <= 1023 -> 1023
+                sysInt <= 2047 -> 2047
+                sysInt <= 4095 -> 4095
+                sysInt <= 8191 -> 8191
+                sysInt <= 10000 -> 10000
+                sysInt <= 16383 -> 16383
+                else -> 65535
+            }
+        }
+        val span = (maxInt - minInt).coerceAtLeast(1)
+        ((sysInt - minInt).toFloat() / span.toFloat()).coerceIn(0.01f, 1.0f)
+    } else {
+        null
+    }
+
+    val floatSetting = try {
+        Settings.System.getFloat(cr, "screen_brightness_float", -1f)
+    } catch (_: Exception) {
+        -1f
+    }
+    if (!floatSetting.isNaN() && floatSetting in 0f..1f) {
+        val normalizedFloat = floatSetting.coerceIn(0.01f, 1.0f)
+        if (sysInt > 255 && intNormalized != null && abs(normalizedFloat - intNormalized) > 0.15f) {
+            return intNormalized
+        }
+        return normalizedFloat
+    }
+
+    return intNormalized ?: 0.5f
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -702,21 +767,8 @@ private fun ReaderViewport(
                     val viewportHeight = size.height.toFloat().coerceAtLeast(1f)
                     var dragStarted = false
                     var lastY = down.position.y
-                    var curB = if (currentBrightness < 0f) {
-                        try {
-                            val sysVal = Settings.System.getInt(
-                                context.contentResolver,
-                                Settings.System.SCREEN_BRIGHTNESS,
-                                128
-                            )
-                            (sysVal / 255f).coerceIn(0.01f, 1.0f)
-                        } catch (_: Exception) {
-                            0.5f
-                        }
-                    } else {
-                        currentBrightness.coerceIn(0.01f, 1.0f)
-                    }
-                    var curD = currentExtraDim.coerceIn(0f, 0.80f)
+                    var curB = 0.5f
+                    var curD = 0f
 
                     try {
                         while (true) {
@@ -735,10 +787,17 @@ private fun ReaderViewport(
                                     break
                                 }
                                 if (abs(dy) > touchSlop && abs(dy) > abs(dx) * 1.2f) {
+                                    curB = if (currentBrightness < 0f) {
+                                        resolveCurrentSystemBrightness(context)
+                                    } else {
+                                        currentBrightness.coerceIn(0.01f, 1.0f)
+                                    }
+                                    curD = currentExtraDim.coerceIn(0f, 0.80f)
                                     dragStarted = true
                                     isEdgeDraggingBrightness = true
                                     lastY = change.position.y
                                     change.consume()
+                                    viewModel.setUnifiedBrightness(curB, curD)
                                 }
                             } else {
                                 val deltaY = change.position.y - lastY
@@ -1359,8 +1418,13 @@ private fun ReaderBottomBar(
 
                             Spacer(modifier = Modifier.width(8.dp))
 
+                            val barContext = LocalContext.current
+                            val systemBrightnessFallback = remember(showBrightnessBar) {
+                                resolveCurrentSystemBrightness(barContext)
+                            }
+
                             Slider(
-                                value = if (brightnessLevel < 0f) 0.5f else brightnessLevel,
+                                value = if (brightnessLevel < 0f) systemBrightnessFallback else brightnessLevel,
                                 onValueChange = { onBrightnessChange(it) },
                                 valueRange = 0.01f..1.0f,
                                 modifier = Modifier
