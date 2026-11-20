@@ -72,13 +72,15 @@ import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -130,6 +132,14 @@ fun LibraryBrowserScreen(
     appSettings: AppSettings,
     recents: List<PdfRecentItem>,
     selectedKeys: Set<String> = emptySet(),
+    isSearchActive: Boolean = false,
+    searchQuery: String = "",
+    onSearchActiveChange: (Boolean, String?) -> Unit = { _, _ -> },
+    onSearchQueryChange: (String) -> Unit = {},
+    getScrollPosition: (String) -> BrowserScrollPosition = { BrowserScrollPosition() },
+    onSaveScrollPosition: (String, Int, Int) -> Unit = { _, _, _ -> },
+    getSearchScrollPosition: () -> BrowserScrollPosition = { BrowserScrollPosition() },
+    onSaveSearchScrollPosition: (Int, Int) -> Unit = { _, _ -> },
     onNavigateLocation: (String) -> Unit,
     onNavigateUp: () -> Unit,
     onOpenPdf: (Uri) -> Unit,
@@ -153,13 +163,17 @@ fun LibraryBrowserScreen(
 
     val root = listing.root
     val relDir = listing.relDir
+    val currentLocationKey = remember(root?.id, relDir) {
+        root?.let { "${it.id}|$relDir" } ?: ""
+    }
     val currentFolderName = remember(root, relDir) {
         if (relDir.isEmpty()) root?.name ?: "Library" else relDir.substringAfterLast('/')
     }
 
-    var isSearchActive by rememberSaveable(root?.id) { mutableStateOf(false) }
-    var searchQuery by rememberSaveable(root?.id) { mutableStateOf("") }
-    var debouncedQuery by remember { mutableStateOf("") }
+    val currentSearchQuery by rememberUpdatedState(searchQuery)
+    var debouncedQuery by remember {
+        mutableStateOf(if (isSearchActive) searchQuery.trim() else "")
+    }
     var showSortMenu by remember { mutableStateOf(false) }
     var detailsPdf by remember { mutableStateOf<LibraryPdf?>(null) }
     var pendingDeletePdfs by remember { mutableStateOf<List<LibraryPdf>>(emptyList()) }
@@ -169,8 +183,10 @@ fun LibraryBrowserScreen(
 
     LaunchedEffect(isSearchActive) {
         if (isSearchActive) {
-            searchFocusRequester.requestFocus()
-            snapshotFlow { searchQuery }
+            if (currentSearchQuery.isEmpty()) {
+                searchFocusRequester.requestFocus()
+            }
+            snapshotFlow { currentSearchQuery }
                 .debounce(150L)
                 .collect { debouncedQuery = it.trim() }
         } else {
@@ -180,16 +196,23 @@ fun LibraryBrowserScreen(
 
     // Search BackHandler is registered first; selection BackHandler below overrides it when active.
     BackHandler(enabled = isSearchActive) {
-        isSearchActive = false
-        searchQuery = ""
+        onSearchActiveChange(false, root?.id)
     }
 
     BackHandler(enabled = isSelectionMode) {
         onClearSelection()
     }
 
+    val initialSearchResults = remember {
+        if (isSearchActive && debouncedQuery.isNotBlank()) {
+            listing.allRootFiles.filter { it.name.contains(debouncedQuery, ignoreCase = true) }
+        } else {
+            emptyList()
+        }
+    }
+
     val searchResults by produceState(
-        initialValue = emptyList<LibraryPdf>(),
+        initialValue = initialSearchResults,
         debouncedQuery,
         listing.allRootFiles,
         isSearchActive
@@ -359,8 +382,7 @@ fun LibraryBrowserScreen(
                     modifier = Modifier.statusBarsPadding(),
                     navigationIcon = {
                         IconButton(onClick = {
-                            isSearchActive = false
-                            searchQuery = ""
+                            onSearchActiveChange(false, root?.id)
                         }) {
                             Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Close Search")
                         }
@@ -368,7 +390,7 @@ fun LibraryBrowserScreen(
                     title = {
                         TextField(
                             value = searchQuery,
-                            onValueChange = { searchQuery = it },
+                            onValueChange = onSearchQueryChange,
                             placeholder = {
                                 Text(
                                     text = "Search in ${root?.name ?: "library"}...",
@@ -379,7 +401,7 @@ fun LibraryBrowserScreen(
                             },
                             trailingIcon = {
                                 if (searchQuery.isNotEmpty()) {
-                                    IconButton(onClick = { searchQuery = "" }) {
+                                    IconButton(onClick = { onSearchQueryChange("") }) {
                                         Icon(
                                             imageVector = Icons.Default.Close,
                                             contentDescription = "Clear",
@@ -421,7 +443,7 @@ fun LibraryBrowserScreen(
                         )
                     },
                     actions = {
-                        IconButton(onClick = { isSearchActive = true }) {
+                        IconButton(onClick = { onSearchActiveChange(true, root?.id) }) {
                             Icon(Icons.Default.Search, contentDescription = "Search folder")
                         }
                         Box {
@@ -650,7 +672,32 @@ fun LibraryBrowserScreen(
                         )
                     }
                 } else {
+                    val savedSearchPos = remember(debouncedQuery) {
+                        getSearchScrollPosition()
+                    }
+                    val searchListState = key(debouncedQuery) {
+                        rememberLazyListState(
+                            initialFirstVisibleItemIndex = savedSearchPos.firstVisibleItemIndex,
+                            initialFirstVisibleItemScrollOffset = savedSearchPos.firstVisibleItemScrollOffset
+                        )
+                    }
+                    LaunchedEffect(searchListState) {
+                        snapshotFlow {
+                            searchListState.firstVisibleItemIndex to searchListState.firstVisibleItemScrollOffset
+                        }.collect { (index, offset) ->
+                            onSaveSearchScrollPosition(index, offset)
+                        }
+                    }
+                    DisposableEffect(searchListState) {
+                        onDispose {
+                            onSaveSearchScrollPosition(
+                                searchListState.firstVisibleItemIndex,
+                                searchListState.firstVisibleItemScrollOffset
+                            )
+                        }
+                    }
                     LazyColumn(
+                        state = searchListState,
                         modifier = Modifier
                             .fillMaxSize()
                             .testTag("library_browser_list"),
@@ -702,7 +749,38 @@ fun LibraryBrowserScreen(
                     }
                 }
             } else {
+                val savedPos = remember(currentLocationKey) {
+                    getScrollPosition(currentLocationKey)
+                }
+                val listState = key(currentLocationKey) {
+                    rememberLazyListState(
+                        initialFirstVisibleItemIndex = savedPos.firstVisibleItemIndex,
+                        initialFirstVisibleItemScrollOffset = savedPos.firstVisibleItemScrollOffset
+                    )
+                }
+                LaunchedEffect(listState, currentLocationKey) {
+                    if (currentLocationKey.isNotEmpty()) {
+                        snapshotFlow {
+                            listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
+                        }.collect { (index, offset) ->
+                            onSaveScrollPosition(currentLocationKey, index, offset)
+                        }
+                    }
+                }
+                DisposableEffect(listState, currentLocationKey) {
+                    onDispose {
+                        if (currentLocationKey.isNotEmpty()) {
+                            onSaveScrollPosition(
+                                currentLocationKey,
+                                listState.firstVisibleItemIndex,
+                                listState.firstVisibleItemScrollOffset
+                            )
+                        }
+                    }
+                }
+
                 LazyColumn(
+                    state = listState,
                     modifier = Modifier
                         .fillMaxSize()
                         .testTag("library_browser_list"),
@@ -757,6 +835,13 @@ fun LibraryBrowserScreen(
                                     folder = item.entry,
                                     onClick = {
                                         if (!isSelectionMode && targetLocation.isNotEmpty()) {
+                                            if (currentLocationKey.isNotEmpty()) {
+                                                onSaveScrollPosition(
+                                                    currentLocationKey,
+                                                    listState.firstVisibleItemIndex,
+                                                    listState.firstVisibleItemScrollOffset
+                                                )
+                                            }
                                             onNavigateLocation(targetLocation)
                                         }
                                     }

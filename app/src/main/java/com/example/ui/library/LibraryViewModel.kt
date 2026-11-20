@@ -50,6 +50,11 @@ sealed interface BrowserItem {
     }
 }
 
+data class BrowserScrollPosition(
+    val firstVisibleItemIndex: Int = 0,
+    val firstVisibleItemScrollOffset: Int = 0
+)
+
 data class BrowserListing(
     val root: LibraryRoot? = null,
     val relDir: String = "",
@@ -76,6 +81,17 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
     private val _selectedKeys = MutableStateFlow<Set<String>>(emptySet())
     val selectedKeys: StateFlow<Set<String>> = _selectedKeys.asStateFlow()
 
+    private val folderScrollPositions = HashMap<String, BrowserScrollPosition>()
+
+    private val _isSearchActive = MutableStateFlow(false)
+    val isSearchActive: StateFlow<Boolean> = _isSearchActive.asStateFlow()
+
+    private val _searchQuery = MutableStateFlow("")
+    val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
+
+    private var searchScrollPosition = BrowserScrollPosition()
+    private var searchRootId: String? = null
+
     val listing: StateFlow<BrowserListing> = combine(
         libraryRepository.tree,
         settingsRepository.settings,
@@ -100,10 +116,96 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun setLocation(location: String?) {
-        if (locationFlow.value != location) {
+        val previous = locationFlow.value
+        if (previous != location) {
             _selectedKeys.value = emptySet()
             locationFlow.value = location
+            if (location == null) {
+                folderScrollPositions.clear()
+                resetSearchState()
+            } else {
+                val newRootId = extractRootId(location)
+                if (searchRootId != null && searchRootId != newRootId) {
+                    resetSearchState()
+                }
+                if (previous != null) {
+                    val prevRootId = extractRootId(previous)
+                    if (prevRootId != newRootId) {
+                        folderScrollPositions.keys.removeAll {
+                            it == prevRootId || it.startsWith("$prevRootId|")
+                        }
+                    } else if (isChildLocation(parent = location, child = previous)) {
+                        // Navigating up to a parent folder clears saved scroll positions of exited child folders.
+                        folderScrollPositions.keys.removeAll { key ->
+                            key != location && isChildLocation(parent = location, child = key)
+                        }
+                    }
+                }
+            }
         }
+    }
+
+    fun getScrollPosition(locationKey: String): BrowserScrollPosition {
+        if (locationKey.isEmpty()) return BrowserScrollPosition()
+        return folderScrollPositions[locationKey] ?: BrowserScrollPosition()
+    }
+
+    fun saveScrollPosition(locationKey: String, index: Int, offset: Int) {
+        if (locationKey.isEmpty() || locationKey != locationFlow.value) return
+        folderScrollPositions[locationKey] = BrowserScrollPosition(
+            firstVisibleItemIndex = index.coerceAtLeast(0),
+            firstVisibleItemScrollOffset = offset.coerceAtLeast(0)
+        )
+    }
+
+    fun setSearchActive(active: Boolean, rootId: String?) {
+        _isSearchActive.value = active
+        if (active) {
+            searchRootId = rootId
+        } else {
+            resetSearchState()
+        }
+    }
+
+    fun setSearchQuery(query: String) {
+        val previous = _searchQuery.value
+        _searchQuery.value = query
+        if (previous != query) {
+            searchScrollPosition = BrowserScrollPosition()
+        }
+    }
+
+    fun getSearchScrollPosition(): BrowserScrollPosition = searchScrollPosition
+
+    fun saveSearchScrollPosition(index: Int, offset: Int) {
+        if (!_isSearchActive.value) return
+        searchScrollPosition = BrowserScrollPosition(
+            firstVisibleItemIndex = index.coerceAtLeast(0),
+            firstVisibleItemScrollOffset = offset.coerceAtLeast(0)
+        )
+    }
+
+    private fun resetSearchState() {
+        _isSearchActive.value = false
+        _searchQuery.value = ""
+        searchScrollPosition = BrowserScrollPosition()
+        searchRootId = null
+    }
+
+    private fun extractRootId(location: String): String {
+        val pipeIdx = location.indexOf('|')
+        return if (pipeIdx >= 0) location.substring(0, pipeIdx) else location
+    }
+
+    private fun isChildLocation(parent: String, child: String): Boolean {
+        val parentRoot = extractRootId(parent)
+        val childRoot = extractRootId(child)
+        if (parentRoot != childRoot) return false
+        val parentRel = parent.substringAfter('|', "").trim('/')
+        val childRel = child.substringAfter('|', "").trim('/')
+        if (childRel.isEmpty()) return false
+        if (parentRel.isEmpty()) return true
+        return childRel.startsWith("$parentRel/")
     }
 
     fun toggleSelection(pdf: LibraryPdf) {

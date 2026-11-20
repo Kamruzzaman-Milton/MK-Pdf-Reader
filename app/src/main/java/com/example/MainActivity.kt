@@ -198,6 +198,8 @@ fun MainAppContent(
     val libraryListing by libraryViewModel.listing.collectAsStateWithLifecycle()
     val librarySettings by libraryViewModel.appSettings.collectAsStateWithLifecycle()
     val selectedLibraryKeys by libraryViewModel.selectedKeys.collectAsStateWithLifecycle()
+    val isLibrarySearchActive by libraryViewModel.isSearchActive.collectAsStateWithLifecycle()
+    val librarySearchQuery by libraryViewModel.searchQuery.collectAsStateWithLifecycle()
     val recentPdfs by homeViewModel.recentPdfs.collectAsStateWithLifecycle()
 
     LaunchedEffect(libraryLocation) {
@@ -288,6 +290,26 @@ fun MainAppContent(
                 appSettings = librarySettings,
                 recents = recentPdfs,
                 selectedKeys = selectedLibraryKeys,
+                isSearchActive = isLibrarySearchActive,
+                searchQuery = librarySearchQuery,
+                onSearchActiveChange = { active, rootId ->
+                    libraryViewModel.setSearchActive(active, rootId)
+                },
+                onSearchQueryChange = { query ->
+                    libraryViewModel.setSearchQuery(query)
+                },
+                getScrollPosition = { locationKey ->
+                    libraryViewModel.getScrollPosition(locationKey)
+                },
+                onSaveScrollPosition = { locationKey, index, offset ->
+                    libraryViewModel.saveScrollPosition(locationKey, index, offset)
+                },
+                getSearchScrollPosition = {
+                    libraryViewModel.getSearchScrollPosition()
+                },
+                onSaveSearchScrollPosition = { index, offset ->
+                    libraryViewModel.saveSearchScrollPosition(index, offset)
+                },
                 onNavigateLocation = { newLoc ->
                     libraryLocation = newLoc
                     libraryViewModel.setLocation(newLoc)
